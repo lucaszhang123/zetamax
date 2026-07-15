@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Log in — Zetamax{% endblock %}
+{% block content %}
+<div class="ss-auth-wrap">
+  <div class="ss-auth-card">
+    <div class="ss-eyebrow">zetamax</div>
+    <h1 class="ss-h1">Log in</h1>
+    <p class="ss-sub">Pick up your stats and your weak spots where you left off.</p>
+    <form method="POST" action="{{ url_for('login') }}" class="ss-auth-form">
+      <div class="ss-field">
+        <label for="username">Username</label>
+        <input class="ss-input" type="text" id="username" name="username" autocomplete="username" required autofocus />
+      </div>
+      <div class="ss-field">
+        <label for="password">Password</label>
+        <input class="ss-input" type="password" id="password" name="password" autocomplete="current-password" required />
+      </div>
+      <button class="ss-btn ss-btn-primary ss-btn-block" type="submit">Log in</button>
+    </form>
+    <p class="ss-auth-switch">No account yet? <a href="{{ url_for('register') }}">Create one</a></p>
+  </div>
+</div>
+{% endblock %}

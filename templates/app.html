@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+{% block title %}Zetamax{% endblock %}
+{% block content %}
+<div class="ss-root" id="ssRoot">
+
+  <div class="ss-tabbar" id="ssTabbar">
+    <button class="ss-tab ss-tab-active" data-tab="home">Practice</button>
+    <button class="ss-tab" data-tab="history">History</button>
+  </div>
+
+  <!-- ================= HOME ================= -->
+  <div id="ssScreenHome">
+    <div class="ss-eyebrow">zetamax</div>
+    <h1 class="ss-h1">Speed math practice</h1>
+    <p class="ss-sub">Timed arithmetic, scored like a scoreboard. Practice mode learns which problems slow you down.</p>
+
+    <div class="ss-panel">
+      <div class="ss-panel-title">Run setup</div>
+
+      <div class="ss-op-config">
+        <div class="ss-op-row">
+          <label class="ss-op-check"><input type="checkbox" id="ssOpAdd" checked><span class="ss-op-name">Addition</span></label>
+          <div class="ss-op-range">
+            Range: (<input type="number" class="ss-range-input" id="ssAddMin1" value="2" min="0" max="9999">
+            to <input type="number" class="ss-range-input" id="ssAddMax1" value="100" min="0" max="9999">) +
+            (<input type="number" class="ss-range-input" id="ssAddMin2" value="2" min="0" max="9999">
+            to <input type="number" class="ss-range-input" id="ssAddMax2" value="100" min="0" max="9999">)
+          </div>
+        </div>
+
+        <div class="ss-op-row">
+          <label class="ss-op-check"><input type="checkbox" id="ssOpSub" checked><span class="ss-op-name">Subtraction</span></label>
+          <div class="ss-op-range ss-op-range-static">Addition problems in reverse.</div>
+        </div>
+
+        <div class="ss-op-row">
+          <label class="ss-op-check"><input type="checkbox" id="ssOpMul" checked><span class="ss-op-name">Multiplication</span></label>
+          <div class="ss-op-range">
+            Range: (<input type="number" class="ss-range-input" id="ssMulMin1" value="2" min="0" max="9999">
+            to <input type="number" class="ss-range-input" id="ssMulMax1" value="12" min="0" max="9999">) ×
+            (<input type="number" class="ss-range-input" id="ssMulMin2" value="2" min="0" max="9999">
+            to <input type="number" class="ss-range-input" id="ssMulMax2" value="100" min="0" max="9999">)
+          </div>
+        </div>
+
+        <div class="ss-op-row">
+          <label class="ss-op-check"><input type="checkbox" id="ssOpDiv" checked><span class="ss-op-name">Division</span></label>
+          <div class="ss-op-range ss-op-range-static">Multiplication problems in reverse.</div>
+        </div>
+      </div>
+
+      <div class="ss-field" style="margin-top:16px; max-width:220px;">
+        <label for="ssDuration">Duration</label>
+        <select class="ss-select" id="ssDuration">
+          <option value="30">30 seconds</option>
+          <option value="60">60 seconds</option>
+          <option value="120" selected>120 seconds</option>
+          <option value="300">300 seconds</option>
+        </select>
+      </div>
+
+      <div class="ss-row" style="margin-top:18px;">
+        <button class="ss-btn ss-btn-primary" id="ssStartStandard">Start standard run</button>
+        <button class="ss-btn ss-btn-secondary" id="ssStartImprove">Start improvement run</button>
+      </div>
+      <div class="ss-sub" style="margin:10px 0 0 0;" id="ssImproveGateNote">Loading…</div>
+    </div>
+
+    <div class="ss-panel">
+      <div class="ss-panel-title">
+        <span>Your stats</span>
+        <button class="ss-btn ss-btn-danger" id="ssReset" style="padding:4px 10px; font-size:11px;">Clear data</button>
+      </div>
+      <div class="ss-stats-duration-row" id="ssHomeDurationPills">
+        <button class="ss-duration-pill" data-duration="30">30s</button>
+        <button class="ss-duration-pill" data-duration="60">60s</button>
+        <button class="ss-duration-pill ss-duration-pill-active" data-duration="120">120s</button>
+        <button class="ss-duration-pill" data-duration="300">300s</button>
+      </div>
+      <div class="ss-sub" id="ssStatsFilterNote" style="margin:8px 0 14px 0;">Loading…</div>
+      <div id="ssStatsBody">
+        <div class="ss-empty">Loading…</div>
+      </div>
+
+      <div class="ss-stats-distribution">
+        <div class="ss-stats-subtitle">Score distribution</div>
+        <div class="ss-sub" style="margin:0 0 10px 0;">How your scores at this duration are spread out across standard runs at default settings.</div>
+        <div id="ssHomeDistribution"><div class="ss-empty">Loading…</div></div>
+      </div>
+    </div>
+
+    <div class="ss-panel" id="ssWeakPanel">
+      <div class="ss-panel-title">Speed by category</div>
+      <div id="ssWeakBody"><div class="ss-empty">Category breakdown will appear after your first run.</div></div>
+    </div>
+
+    <div class="ss-panel" id="ssGroupPanel">
+      <div class="ss-panel-title">Weak spots by fact</div>
+      <div class="ss-sub" style="margin:0 0 12px 0;">Breaks multiplication and division down to the individual ×/÷ fact (like ×9), and addition/subtraction into rough number-size bands.</div>
+      <div id="ssGroupBody"><div class="ss-empty">Fact-level breakdown will appear once you've solved a few problems.</div></div>
+    </div>
+
+    <div class="ss-panel" id="ssHistoryPanel">
+      <div class="ss-panel-title">Run history</div>
+      <div id="ssHistoryBody"><div class="ss-empty">No runs yet.</div></div>
+    </div>
+  </div>
+
+  <!-- ================= HISTORY (TRENDS) ================= -->
+  <div id="ssScreenHistory" class="ss-hidden">
+    <div class="ss-eyebrow">zetamax</div>
+    <h1 class="ss-h1">Your history</h1>
+    <p class="ss-sub">Daily trends across scores and per-category speed, so you can see what's actually improving.</p>
+
+    <div class="ss-panel">
+      <div class="ss-panel-title">Daily score trend</div>
+      <div class="ss-stats-duration-row" id="ssTrendDurationPills">
+        <button class="ss-duration-pill" data-duration="30">30s</button>
+        <button class="ss-duration-pill" data-duration="60">60s</button>
+        <button class="ss-duration-pill ss-duration-pill-active" data-duration="120">120s</button>
+        <button class="ss-duration-pill" data-duration="300">300s</button>
+      </div>
+      <div class="ss-sub" style="margin:8px 0 14px 0;">Standard runs, default settings only, one point per day — improvement runs don't factor into your score, so they're left out here too.</div>
+      <div id="ssTrendScoreChart"><div class="ss-empty">Loading…</div></div>
+    </div>
+
+    <div class="ss-panel">
+      <div class="ss-panel-title">Category speed over time</div>
+      <div class="ss-sub" style="margin:0 0 12px 0;">Includes improvement-mode problems — speed data updates regardless of run type, even though improvement runs don't count toward your score stats.</div>
+      <div id="ssTrendCategoryChart"><div class="ss-empty">Loading…</div></div>
+    </div>
+
+    <div class="ss-panel">
+      <div class="ss-panel-title">Biggest movers by fact</div>
+      <div class="ss-sub" style="margin:0 0 12px 0;">Compares your earliest solves of each fact to your most recent ones — shows what's actually getting faster or slower.</div>
+      <div id="ssTrendFactBody"><div class="ss-empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- ================= GAME ================= -->
+  <div id="ssScreenGame" class="ss-hidden">
+    <div class="ss-game-top">
+      <div class="ss-flap-group">
+        <div class="ss-flap-block">
+          <div class="ss-flap-label">Time left</div>
+          <div class="ss-flap ss-flap-timer ss-mono" id="ssTimerFlap">0:00</div>
+        </div>
+        <div class="ss-flap-block">
+          <div class="ss-flap-label">Score</div>
+          <div class="ss-flap ss-flap-score ss-mono" id="ssScoreFlap">0</div>
+        </div>
+      </div>
+      <div>
+        <div class="ss-mode-tag" id="ssModeTag">Standard</div>
+      </div>
+    </div>
+
+    <div class="ss-problem-card" id="ssProblemCard">
+      <div class="ss-problem-text" id="ssProblemText">--</div>
+    </div>
+
+    <input class="ss-answer-input" id="ssAnswerInput" type="text" inputmode="numeric" autocomplete="off" />
+
+    <div class="ss-game-footer">
+      <span id="ssStreakLabel">streak 0</span>
+      <button class="ss-btn ss-btn-ghost" id="ssQuitRun" style="padding:6px 12px; font-size:12px;">Quit</button>
+    </div>
+  </div>
+
+  <!-- ================= RESULTS ================= -->
+  <div id="ssScreenResults" class="ss-hidden">
+    <div class="ss-eyebrow" id="ssResultMode">standard run</div>
+    <div class="ss-result-hero">
+      <div class="ss-result-score ss-mono" id="ssResultScore">0</div>
+      <div class="ss-result-meta" id="ssResultMeta">correct answers</div>
+    </div>
+
+    <div class="ss-panel">
+      <div class="ss-panel-title">This run, by category</div>
+      <div id="ssResultTable"></div>
+    </div>
+
+    <div class="ss-panel">
+      <div class="ss-panel-title">All-time snapshot</div>
+      <div class="ss-stat-grid" id="ssResultAllTime"></div>
+      <div class="ss-sub" id="ssResultAllTimeNote" style="margin:10px 0 0 0;"></div>
+    </div>
+
+    <div class="ss-footer-nav">
+      <button class="ss-btn ss-btn-primary" id="ssRunAgain">Run again</button>
+      <button class="ss-btn ss-btn-ghost" id="ssBackHome">Back to home</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- Improvement-mode chooser -->
+<div class="ss-modal-backdrop ss-hidden" id="ssImproveModal" role="dialog" aria-modal="true" aria-labelledby="ssImproveModalTitle">
+  <div class="ss-modal-card">
+    <div class="ss-modal-header">
+      <div>
+        <div class="ss-eyebrow">improvement mode</div>
+        <h2 class="ss-modal-title" id="ssImproveModalTitle">How should problems be chosen?</h2>
+      </div>
+      <button class="ss-modal-close" id="ssImproveModalClose" type="button" aria-label="Close">×</button>
+    </div>
+
+    <div id="ssImproveChoiceStep">
+      <p class="ss-sub" style="margin-bottom:16px;">Both options use your solve-time history. Auto lets the model choose; manual lets you select exact weak facts such as ×8, ÷9, or Addition · large numbers.</p>
+      <div class="ss-improve-choice-grid">
+        <button class="ss-improve-choice" id="ssImproveAutoChoice" type="button">
+          <span class="ss-improve-choice-kicker">Auto</span>
+          <strong>Let the model choose</strong>
+          <span>The current behavior: generate random candidates, predict which will be slowest, then sample toward those problems.</span>
+        </button>
+        <button class="ss-improve-choice" id="ssImproveManualChoice" type="button">
+          <span class="ss-improve-choice-kicker">Manual</span>
+          <strong>Choose exact weak facts</strong>
+          <span>Select from the same fact-level groups shown in Weak spots by fact, ranked from slowest to fastest.</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="ss-hidden" id="ssImproveManualStep">
+      <button class="ss-modal-back-link" id="ssImproveManualBack" type="button">← Back to options</button>
+      <p class="ss-sub" style="margin:10px 0 14px 0;">Your tracked facts are listed from slowest to fastest. Select exact facts to practice; the model will choose problems only from those facts.</p>
+      <div class="ss-improve-category-list" id="ssImproveCategoryList"></div>
+      <div class="ss-modal-actions">
+        <button class="ss-btn ss-btn-ghost" id="ssImproveManualCancel" type="button">Cancel</button>
+        <button class="ss-btn ss-btn-secondary" id="ssImproveManualStart" type="button">Start selected facts</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% endblock %}
