@@ -5,6 +5,8 @@
 
   <div class="ss-tabbar" id="ssTabbar">
     <button class="ss-tab ss-tab-active" data-tab="home">Practice</button>
+    <button class="ss-tab" data-tab="race">Race</button>
+    <button class="ss-tab" data-tab="career">Race career</button>
     <button class="ss-tab" data-tab="history">History</button>
   </div>
 
@@ -103,6 +105,160 @@
     <div class="ss-panel" id="ssHistoryPanel">
       <div class="ss-panel-title">Run history</div>
       <div id="ssHistoryBody"><div class="ss-empty">No runs yet.</div></div>
+    </div>
+  </div>
+
+  <!-- ================= MULTIPLAYER RACE SETUP ================= -->
+  <div id="ssScreenRace" class="ss-hidden">
+    <div class="ss-eyebrow">multiplayer</div>
+    <h1 class="ss-h1">Create a math race</h1>
+    <p class="ss-sub">Choose the race distance and catalog, then share the room code. Every racer receives the same randomized question sequence.</p>
+
+    <div class="ss-race-setup-grid">
+      <div class="ss-panel">
+        <div class="ss-panel-title">Create a race</div>
+        <div class="ss-field ss-race-distance-field">
+          <label for="ssRaceQuestionCount">Race distance</label>
+          <div class="ss-race-number-wrap">
+            <input class="ss-input ss-race-number-input" id="ssRaceQuestionCount" type="number" min="5" max="200" step="1" value="50" inputmode="numeric">
+            <span>questions</span>
+          </div>
+          <div class="ss-race-distance-presets" aria-label="Question count presets">
+            <button type="button" data-race-count="10">10</button>
+            <button type="button" data-race-count="25">25</button>
+            <button type="button" data-race-count="50" class="ss-race-count-active">50</button>
+            <button type="button" data-race-count="100">100</button>
+          </div>
+          <small class="ss-field-help">Choose from 5 to 200 questions. Everyone in the room races the same distance.</small>
+        </div>
+
+        <div class="ss-field" style="margin-top:16px;">
+          <label>Question catalog</label>
+          <div class="ss-race-catalog-grid">
+            <label class="ss-race-catalog-option"><input type="checkbox" id="ssRaceOpAdd" checked><span>Addition</span></label>
+            <label class="ss-race-catalog-option"><input type="checkbox" id="ssRaceOpSub" checked><span>Subtraction</span></label>
+            <label class="ss-race-catalog-option"><input type="checkbox" id="ssRaceOpMul" checked><span>Multiplication</span></label>
+            <label class="ss-race-catalog-option"><input type="checkbox" id="ssRaceOpDiv" checked><span>Division</span></label>
+          </div>
+        </div>
+
+        <p class="ss-sub" style="margin:14px 0 16px;">The race uses the number ranges currently selected on the Practice tab. The server creates one shared randomized sequence for everyone.</p>
+        <button class="ss-btn ss-btn-primary ss-btn-block" id="ssCreateRace" type="button">Create race room</button>
+      </div>
+
+      <div class="ss-panel">
+        <div class="ss-panel-title">Join a race</div>
+        <div class="ss-race-join-visual" aria-hidden="true">
+          <span>🏎️</span><span>🏁</span>
+        </div>
+        <div class="ss-field">
+          <label for="ssJoinRaceCode">Room code</label>
+          <input class="ss-input ss-race-code-input" id="ssJoinRaceCode" type="text" maxlength="6" autocomplete="off" spellcheck="false" placeholder="ABC123">
+        </div>
+        <button class="ss-btn ss-btn-secondary ss-btn-block" id="ssJoinRace" type="button" style="margin-top:14px;">Join race</button>
+        <div class="ss-race-message" id="ssRaceSetupMessage" role="status"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= RACE LOBBY ================= -->
+  <div id="ssScreenRaceLobby" class="ss-hidden">
+    <div class="ss-race-lobby-head">
+      <div>
+        <div class="ss-eyebrow">race lobby</div>
+        <h1 class="ss-h1">Room <span class="ss-mono ss-race-code-display" id="ssRaceLobbyCode">------</span></h1>
+        <p class="ss-sub" id="ssRaceLobbyCatalog">50 shared questions</p>
+      </div>
+      <button class="ss-btn ss-btn-ghost" id="ssCopyRaceCode" type="button">Copy code</button>
+    </div>
+
+    <div class="ss-panel">
+      <div class="ss-panel-title"><span>Racers</span><span id="ssRaceLobbyCount">0 / 8</span></div>
+      <div class="ss-race-lobby-players" id="ssRaceLobbyPlayers"></div>
+    </div>
+
+    <div class="ss-panel ss-race-lobby-callout">
+      <div>
+        <strong id="ssRaceLobbyStatus">Waiting for racers…</strong>
+        <div class="ss-sub" style="margin:4px 0 0;">Share the six-character code. Once the host starts, everyone gets a four-second countdown.</div>
+      </div>
+      <div class="ss-row">
+        <button class="ss-btn ss-btn-ghost" id="ssLeaveRaceLobby" type="button">Leave</button>
+        <button class="ss-btn ss-btn-primary" id="ssStartRace" type="button">Start race</button>
+      </div>
+    </div>
+    <div class="ss-race-message" id="ssRaceLobbyMessage" role="status"></div>
+  </div>
+
+  <!-- ================= RACE GAME ================= -->
+  <div id="ssScreenRaceGame" class="ss-hidden">
+    <div class="ss-race-game-head">
+      <div>
+        <div class="ss-eyebrow">live race · <span id="ssRaceGameCode">------</span></div>
+        <h1 class="ss-h1" id="ssRaceGameTitle">Race to 50</h1>
+      </div>
+      <div class="ss-race-live-stats">
+        <div><span class="ss-race-live-label">Progress</span><strong class="ss-mono" id="ssRaceProgress">0 / 50</strong></div>
+        <div><span class="ss-race-live-label">Elapsed</span><strong class="ss-mono" id="ssRaceElapsed">0:00.0</strong></div>
+        <div><span class="ss-race-live-label">Live QPM</span><strong class="ss-mono" id="ssRaceLiveQpm">0.0</strong></div>
+      </div>
+    </div>
+
+    <div class="ss-panel ss-race-track-panel">
+      <div class="ss-panel-title">Live positions</div>
+      <div class="ss-race-track-list" id="ssRaceTrackList"></div>
+    </div>
+
+    <div class="ss-race-countdown ss-hidden" id="ssRaceCountdown" aria-live="polite">4</div>
+
+    <div class="ss-problem-card ss-race-problem-card" id="ssRaceProblemCard">
+      <div class="ss-problem-text" id="ssRaceProblemText">Get ready…</div>
+      <div class="ss-race-answer-hint">Answers submit automatically as soon as they are correct.</div>
+    </div>
+    <input class="ss-answer-input" id="ssRaceAnswerInput" type="text" inputmode="numeric" autocomplete="off" disabled>
+
+    <div class="ss-game-footer">
+      <span id="ssRaceMistakes">mistakes 0</span>
+      <button class="ss-btn ss-btn-ghost" id="ssQuitRace" style="padding:6px 12px; font-size:12px;" type="button">Leave race</button>
+    </div>
+  </div>
+
+  <!-- ================= RACE RESULTS ================= -->
+  <div id="ssScreenRaceResults" class="ss-hidden">
+    <div class="ss-eyebrow">race complete · <span id="ssRaceResultsCode">------</span></div>
+    <div class="ss-race-results-hero">
+      <div>
+        <div class="ss-result-score ss-mono" id="ssRaceResultQpm">0.0</div>
+        <div class="ss-result-meta">QPM · questions per minute</div>
+      </div>
+      <div class="ss-race-place-badge" id="ssRaceResultPlace">—</div>
+    </div>
+
+    <div class="ss-panel ss-race-track-panel">
+      <div class="ss-panel-title">Final track</div>
+      <div class="ss-race-track-list" id="ssRaceFinalTrack"></div>
+    </div>
+
+    <div class="ss-panel">
+      <div class="ss-panel-title">Race standings</div>
+      <div id="ssRaceResultsTable"></div>
+      <div class="ss-sub" id="ssRaceResultsNote" style="margin:12px 0 0;"></div>
+    </div>
+
+    <div class="ss-footer-nav">
+      <button class="ss-btn ss-btn-primary" id="ssNewRace" type="button">New race</button>
+      <button class="ss-btn ss-btn-ghost" id="ssRaceBackHome" type="button">Back to practice</button>
+    </div>
+  </div>
+
+  <!-- ================= RACE CAREER ================= -->
+  <div id="ssScreenCareer" class="ss-hidden">
+    <div class="ss-eyebrow">multiplayer profile</div>
+    <h1 class="ss-h1">Race career</h1>
+    <p class="ss-sub">Track your completed races, wins, and questions-per-minute pace over time.</p>
+
+    <div id="ssRaceCareerBody">
+      <div class="ss-panel"><div class="ss-empty">Loading race career…</div></div>
     </div>
   </div>
 

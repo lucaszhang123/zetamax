@@ -978,18 +978,641 @@
     }
   }
 
+
+  // ---------------------------------------------------------------------
+  // multiplayer race mode
+  // ---------------------------------------------------------------------
+  let currentScreen = 'home';
+  const RACE_MAX_PLAYERS = 8;
+  const RACE_MIN_QUESTIONS = 5;
+  const RACE_MAX_QUESTIONS = 200;
+  const RACE_POLL_MS = 650;
+  const RACE_STORAGE_KEY = 'zetamaxActiveRace';
+  let raceSession = {
+    code: null,
+    state: null,
+    pollHandle: null,
+    clockHandle: null,
+    pollBusy: false,
+    answerBusy: false,
+    serverOffsetMs: 0,
+    lastProgress: null,
+    countdownRefreshTriggered: false,
+  };
+
+  async function raceApi(url, options = {}) {
+    const response = await fetch(url, options);
+    const text = await response.text();
+    let data = {};
+    if (text) {
+      try { data = JSON.parse(text); } catch (_) { data = {}; }
+    }
+    if (!response.ok) {
+      throw new Error(data.error || `Race request failed (${response.status})`);
+    }
+    return data;
+  }
+
+  function apiCreateRace(ops, ranges, questionCount) {
+    return raceApi('/api/races', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ops, ranges, question_count: questionCount }),
+    });
+  }
+
+  function apiGetRaceCareer() {
+    return raceApi('/api/race_career');
+  }
+
+  function apiJoinRace(code) {
+    return raceApi('/api/races/join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+  }
+
+  function apiGetRace(code) {
+    return raceApi(`/api/races/${encodeURIComponent(code)}`);
+  }
+
+  function apiStartRace(code) {
+    return raceApi(`/api/races/${encodeURIComponent(code)}/start`, { method: 'POST' });
+  }
+
+  function apiSubmitRaceAnswer(code, answer) {
+    return raceApi(`/api/races/${encodeURIComponent(code)}/answer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answer }),
+    });
+  }
+
+  function apiLeaveRace(code) {
+    return raceApi(`/api/races/${encodeURIComponent(code)}/leave`, { method: 'POST' });
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  }
+
+  function ordinal(n) {
+    const mod100 = n % 100;
+    if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+    if (n % 10 === 1) return `${n}st`;
+    if (n % 10 === 2) return `${n}nd`;
+    if (n % 10 === 3) return `${n}rd`;
+    return `${n}th`;
+  }
+
+  function fmtRaceTime(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '—';
+    const totalTenths = Math.floor(ms / 100);
+    const minutes = Math.floor(totalTenths / 600);
+    const seconds = Math.floor((totalTenths % 600) / 10);
+    const tenths = totalTenths % 10;
+    return `${minutes}:${String(seconds).padStart(2, '0')}.${tenths}`;
+  }
+
+  function getRaceOps() {
+    const pairs = [
+      ['ssRaceOpAdd', 'add'],
+      ['ssRaceOpSub', 'sub'],
+      ['ssRaceOpMul', 'mul'],
+      ['ssRaceOpDiv', 'div'],
+    ];
+    return pairs.filter(([id]) => document.getElementById(id).checked).map(([, op]) => op);
+  }
+
+  function getRaceQuestionCount() {
+    const input = document.getElementById('ssRaceQuestionCount');
+    const parsed = Number.parseInt(input.value, 10);
+    if (!Number.isFinite(parsed)) return null;
+    return Math.max(RACE_MIN_QUESTIONS, Math.min(RACE_MAX_QUESTIONS, parsed));
+  }
+
+  function syncRaceCountPresets() {
+    const count = getRaceQuestionCount();
+    document.querySelectorAll('[data-race-count]').forEach(button => {
+      button.classList.toggle('ss-race-count-active', Number(button.dataset.raceCount) === count);
+    });
+  }
+
+  function raceCatalogLabel(ops) {
+    const labels = (ops || []).map(op => OP_LABEL[op]).filter(Boolean);
+    return labels.length === OPS.length ? 'Mixed catalog · all four operations' : `${labels.join(', ')} catalog`;
+  }
+
+  function setRaceMessage(id, message, isError = false) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = message || '';
+    el.classList.toggle('ss-race-message-error', Boolean(message && isError));
+  }
+
+  function formatRaceDate(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return '—';
+    return date.toLocaleString(undefined, {
+      month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+  }
+
+  async function renderRaceCareer() {
+    const body = document.getElementById('ssRaceCareerBody');
+    if (!body) return;
+    body.innerHTML = '<div class="ss-panel"><div class="ss-empty">Loading race career…</div></div>';
+    try {
+      const career = await apiGetRaceCareer();
+      if (!career.races_completed) {
+        body.innerHTML = `
+          <div class="ss-panel ss-career-empty">
+            <div class="ss-career-empty-car" aria-hidden="true">🏎️</div>
+            <h2>No completed races yet</h2>
+            <p>Finish your first multiplayer race to start building QPM and win statistics.</p>
+            <button class="ss-btn ss-btn-primary" id="ssCareerStartRace" type="button">Create a race</button>
+          </div>`;
+        document.getElementById('ssCareerStartRace').addEventListener('click', () => showScreen('race'));
+        return;
+      }
+
+      const recentRows = career.recent.map(race => {
+        const place = race.racer_count >= 2 ? ordinal(race.place) : 'solo';
+        const result = race.won
+          ? '<span class="ss-career-result ss-career-result-win">Win</span>'
+          : `<span class="ss-career-result">${place}</span>`;
+        return `
+          <tr>
+            <td style="font-family:Inter,sans-serif;">${formatRaceDate(race.completed_at)}</td>
+            <td>${result}</td>
+            <td>${race.racer_count}</td>
+            <td>${race.question_count}</td>
+            <td>${fmtRaceTime(race.elapsed_ms)}</td>
+            <td><strong>${Number(race.qpm).toFixed(1)}</strong></td>
+          </tr>`;
+      }).join('');
+
+      body.innerHTML = `
+        <div class="ss-career-stat-grid">
+          <div class="ss-career-stat ss-career-stat-featured">
+            <span class="ss-career-stat-icon">🏆</span>
+            <strong class="ss-mono">${career.wins}</strong>
+            <span>races won</span>
+          </div>
+          <div class="ss-career-stat">
+            <span class="ss-career-stat-icon">⚡</span>
+            <strong class="ss-mono">${Number(career.average_qpm).toFixed(1)}</strong>
+            <span>average QPM</span>
+          </div>
+          <div class="ss-career-stat">
+            <span class="ss-career-stat-icon">🚀</span>
+            <strong class="ss-mono">${Number(career.best_qpm).toFixed(1)}</strong>
+            <span>best QPM</span>
+          </div>
+          <div class="ss-career-stat">
+            <span class="ss-career-stat-icon">🏁</span>
+            <strong class="ss-mono">${career.races_completed}</strong>
+            <span>races completed</span>
+          </div>
+        </div>
+
+        <div class="ss-panel">
+          <div class="ss-panel-title">
+            <span>Career record</span>
+            <span>${Number(career.win_rate).toFixed(1)}% win rate</span>
+          </div>
+          <div class="ss-career-record-bar">
+            <div class="ss-career-record-fill" style="width:${Math.max(0, Math.min(100, Number(career.win_rate)))}%"></div>
+          </div>
+          <p class="ss-sub" style="margin:10px 0 0;">Wins are counted only in races with at least two racers. QPM includes every race you completed.</p>
+        </div>
+
+        <div class="ss-panel">
+          <div class="ss-panel-title"><span>Recent races</span><span>last ${career.recent.length}</span></div>
+          <div class="ss-career-table-wrap">
+            <table class="ss-table ss-career-table">
+              <tr><th>Date</th><th>Result</th><th>Racers</th><th>Questions</th><th>Time</th><th>QPM</th></tr>
+              ${recentRows}
+            </table>
+          </div>
+        </div>`;
+    } catch (error) {
+      body.innerHTML = `<div class="ss-panel"><div class="ss-empty">Could not load race career: ${escapeHtml(error.message)}</div></div>`;
+    }
+  }
+
+  function currentRacePlayer(state = raceSession.state) {
+    return state ? state.players.find(player => player.is_me) : null;
+  }
+
+  function updateRaceServerClock(state) {
+    if (!state || !state.server_now) return;
+    const serverNow = Date.parse(state.server_now);
+    if (Number.isFinite(serverNow)) raceSession.serverOffsetMs = serverNow - Date.now();
+  }
+
+  function raceNowMs() {
+    return Date.now() + raceSession.serverOffsetMs;
+  }
+
+  function renderRaceTracks(players, targetId, questionCount) {
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    if (!players || !players.length) {
+      target.innerHTML = '<div class="ss-empty">No racers yet.</div>';
+      return;
+    }
+
+    target.innerHTML = players.map((player, index) => {
+      const pct = Math.max(0, Math.min(100, (player.progress / questionCount) * 100));
+      const finished = player.progress >= questionCount;
+      const detail = finished
+        ? `${fmtRaceTime(player.elapsed_ms)} · ${Number(player.qpm || 0).toFixed(1)} QPM`
+        : `${player.progress}/${questionCount}`;
+      return `
+        <div class="ss-race-lane ${player.is_me ? 'ss-race-lane-me' : ''}">
+          <div class="ss-race-lane-name">
+            <span>${escapeHtml(player.username)}${player.is_host ? ' <span class="ss-race-host-tag">host</span>' : ''}</span>
+            <span class="ss-mono">${detail}</span>
+          </div>
+          <div class="ss-race-road">
+            <div class="ss-race-road-lines"></div>
+            <div class="ss-race-finish-line" aria-hidden="true"></div>
+            <div class="ss-race-car ${finished ? 'ss-race-car-finished' : ''}" style="left:${pct}%; --lane:${index};" aria-label="${escapeHtml(player.username)} race car">🏎️</div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  function renderRaceLobby(state) {
+    document.getElementById('ssRaceLobbyCode').textContent = state.code;
+    document.getElementById('ssRaceLobbyCatalog').textContent = `${state.question_count} shared questions · ${raceCatalogLabel(state.ops)}`;
+    document.getElementById('ssRaceLobbyCount').textContent = `${state.players.length} / ${RACE_MAX_PLAYERS}`;
+    document.getElementById('ssRaceGameCode').textContent = state.code;
+    document.getElementById('ssRaceResultsCode').textContent = state.code;
+
+    const wrap = document.getElementById('ssRaceLobbyPlayers');
+    wrap.innerHTML = state.players.map(player => `
+      <div class="ss-race-lobby-player ${player.is_me ? 'ss-race-lobby-player-me' : ''}">
+        <span class="ss-race-lobby-car">🏎️</span>
+        <span>${escapeHtml(player.username)}</span>
+        ${player.is_host ? '<span class="ss-race-host-tag">host</span>' : ''}
+      </div>`).join('');
+
+    const startButton = document.getElementById('ssStartRace');
+    startButton.classList.toggle('ss-hidden', !state.is_host);
+    startButton.disabled = state.status !== 'waiting';
+    document.getElementById('ssRaceLobbyStatus').textContent = state.is_host
+      ? `Ready with ${state.players.length} racer${state.players.length === 1 ? '' : 's'}.`
+      : 'Waiting for the host to start…';
+  }
+
+  function renderRaceGame(state) {
+    const me = currentRacePlayer(state);
+    if (!me) return;
+    document.getElementById('ssRaceGameCode').textContent = state.code;
+    document.getElementById('ssRaceGameTitle').textContent = `Race to ${state.question_count}`;
+    document.getElementById('ssRaceProgress').textContent = `${me.progress} / ${state.question_count}`;
+    document.getElementById('ssRaceLiveQpm').textContent = Number(me.qpm || 0).toFixed(1);
+    document.getElementById('ssRaceMistakes').textContent = `mistakes ${me.wrong_attempts}`;
+    renderRaceTracks(state.players, 'ssRaceTrackList', state.question_count);
+
+    const problemText = document.getElementById('ssRaceProblemText');
+    const input = document.getElementById('ssRaceAnswerInput');
+    const startedAt = Date.parse(state.started_at || '');
+    const hasStarted = Number.isFinite(startedAt) && raceNowMs() >= startedAt;
+
+    if (!hasStarted) {
+      problemText.textContent = 'Get ready…';
+      input.disabled = true;
+    } else if (state.current_question) {
+      problemText.textContent = state.current_question;
+      input.disabled = raceSession.answerBusy;
+      if (raceSession.lastProgress !== me.progress) {
+        input.value = '';
+        raceSession.lastProgress = me.progress;
+      }
+      if (!raceSession.answerBusy && currentScreen === 'raceGame') input.focus();
+    } else {
+      problemText.textContent = 'Loading next question…';
+      input.disabled = true;
+    }
+    updateRaceClock();
+  }
+
+  function renderRaceResults(state) {
+    const me = currentRacePlayer(state);
+    if (!me) return;
+    document.getElementById('ssRaceResultsCode').textContent = state.code;
+    document.getElementById('ssRaceResultQpm').textContent = Number(me.qpm || 0).toFixed(1);
+    document.getElementById('ssRaceResultPlace').textContent = me.finished_at
+      ? `${ordinal(me.position)} place`
+      : `${me.progress}/${state.question_count}`;
+    renderRaceTracks(state.players, 'ssRaceFinalTrack', state.question_count);
+
+    const table = document.getElementById('ssRaceResultsTable');
+    table.innerHTML = `<table class="ss-table ss-race-results-table">
+      <tr><th>Place</th><th>Racer</th><th>Time</th><th>QPM</th><th>Mistakes</th></tr>
+      ${state.players.map(player => `
+        <tr class="${player.is_me ? 'ss-race-result-me' : ''}">
+          <td>${player.finished_at ? ordinal(player.position) : '—'}</td>
+          <td style="font-family:Inter,sans-serif;">${escapeHtml(player.username)}${player.is_host ? ' <span class="ss-race-host-tag">host</span>' : ''}</td>
+          <td>${player.finished_at ? fmtRaceTime(player.elapsed_ms) : `${player.progress}/${state.question_count}`}</td>
+          <td>${Number(player.qpm || 0).toFixed(1)}</td>
+          <td>${player.wrong_attempts}</td>
+        </tr>`).join('')}
+    </table>`;
+
+    const unfinished = state.players.filter(player => !player.finished_at).length;
+    document.getElementById('ssRaceResultsNote').textContent = unfinished
+      ? `${unfinished} racer${unfinished === 1 ? ' is' : 's are'} still on the track. Standings update live.`
+      : 'All racers finished. Rankings are ordered by completion time.';
+  }
+
+  function stopRacePolling() {
+    if (raceSession.pollHandle) clearInterval(raceSession.pollHandle);
+    if (raceSession.clockHandle) clearInterval(raceSession.clockHandle);
+    raceSession.pollHandle = null;
+    raceSession.clockHandle = null;
+    raceSession.pollBusy = false;
+  }
+
+  function ensureRacePolling() {
+    if (!raceSession.pollHandle) {
+      raceSession.pollHandle = setInterval(refreshRaceState, RACE_POLL_MS);
+    }
+    if (!raceSession.clockHandle) {
+      raceSession.clockHandle = setInterval(updateRaceClock, 100);
+    }
+  }
+
+  function resetRaceSession() {
+    stopRacePolling();
+    localStorage.removeItem(RACE_STORAGE_KEY);
+    raceSession.code = null;
+    raceSession.state = null;
+    raceSession.answerBusy = false;
+    raceSession.lastProgress = null;
+    raceSession.countdownRefreshTriggered = false;
+    document.getElementById('ssRaceAnswerInput').value = '';
+  }
+
+  function activateRaceState(state) {
+    raceSession.code = state.code;
+    raceSession.state = state;
+    updateRaceServerClock(state);
+    localStorage.setItem(RACE_STORAGE_KEY, state.code);
+    ensureRacePolling();
+
+    const me = currentRacePlayer(state);
+    if (state.status === 'waiting') {
+      if (currentScreen !== 'raceLobby') showScreen('raceLobby');
+      renderRaceLobby(state);
+      return;
+    }
+
+    if (state.status === 'finished' || (me && me.finished_at)) {
+      if (currentScreen !== 'raceResults') showScreen('raceResults');
+      renderRaceResults(state);
+      if (state.status === 'finished') stopRacePolling();
+      return;
+    }
+
+    if (currentScreen !== 'raceGame') showScreen('raceGame');
+    renderRaceGame(state);
+  }
+
+  async function refreshRaceState() {
+    if (!raceSession.code || raceSession.pollBusy) return;
+    raceSession.pollBusy = true;
+    try {
+      const state = await apiGetRace(raceSession.code);
+      activateRaceState(state);
+    } catch (error) {
+      console.error('race polling failed', error);
+      if (/not found/i.test(error.message)) {
+        resetRaceSession();
+        showScreen('race');
+        setRaceMessage('ssRaceSetupMessage', error.message, true);
+      }
+    } finally {
+      raceSession.pollBusy = false;
+    }
+  }
+
+  function updateRaceClock() {
+    const state = raceSession.state;
+    if (!state || !state.started_at) return;
+    const startedAt = Date.parse(state.started_at);
+    if (!Number.isFinite(startedAt)) return;
+    const delta = raceNowMs() - startedAt;
+    const me = currentRacePlayer(state);
+
+    if (currentScreen === 'raceGame') {
+      const countdown = document.getElementById('ssRaceCountdown');
+      const input = document.getElementById('ssRaceAnswerInput');
+      if (delta < 0) {
+        countdown.textContent = String(Math.max(1, Math.ceil(-delta / 1000)));
+        countdown.classList.remove('ss-hidden');
+        input.disabled = true;
+        document.getElementById('ssRaceElapsed').textContent = '0:00.0';
+      } else {
+        countdown.classList.add('ss-hidden');
+        document.getElementById('ssRaceElapsed').textContent = fmtRaceTime(delta);
+        if (me && !me.finished_at && state.current_question && !raceSession.answerBusy) {
+          input.disabled = false;
+        }
+        const liveQpm = me && delta > 0 ? me.progress * 60000 / delta : 0;
+        document.getElementById('ssRaceLiveQpm').textContent = liveQpm.toFixed(1);
+        if (!state.current_question && !raceSession.countdownRefreshTriggered) {
+          raceSession.countdownRefreshTriggered = true;
+          refreshRaceState();
+        }
+      }
+    }
+  }
+
+  async function createRace() {
+    const ops = getRaceOps();
+    if (!ops.length) {
+      setRaceMessage('ssRaceSetupMessage', 'Select at least one question category.', true);
+      return;
+    }
+    const questionCount = getRaceQuestionCount();
+    if (questionCount === null) {
+      setRaceMessage('ssRaceSetupMessage', 'Enter a question count from 5 to 200.', true);
+      return;
+    }
+    const countInput = document.getElementById('ssRaceQuestionCount');
+    countInput.value = String(questionCount);
+    syncRaceCountPresets();
+    const button = document.getElementById('ssCreateRace');
+    button.disabled = true;
+    setRaceMessage('ssRaceSetupMessage', 'Creating a shared question set…');
+    try {
+      const state = await apiCreateRace(ops, getRanges(), questionCount);
+      setRaceMessage('ssRaceSetupMessage', '');
+      activateRaceState(state);
+    } catch (error) {
+      setRaceMessage('ssRaceSetupMessage', error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function joinRace() {
+    const input = document.getElementById('ssJoinRaceCode');
+    const code = input.value.trim().toUpperCase();
+    if (code.length !== 6) {
+      setRaceMessage('ssRaceSetupMessage', 'Enter the six-character room code.', true);
+      return;
+    }
+    const button = document.getElementById('ssJoinRace');
+    button.disabled = true;
+    setRaceMessage('ssRaceSetupMessage', 'Joining race…');
+    try {
+      const state = await apiJoinRace(code);
+      setRaceMessage('ssRaceSetupMessage', '');
+      activateRaceState(state);
+    } catch (error) {
+      setRaceMessage('ssRaceSetupMessage', error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function startMultiplayerRace() {
+    if (!raceSession.code) return;
+    const button = document.getElementById('ssStartRace');
+    button.disabled = true;
+    setRaceMessage('ssRaceLobbyMessage', 'Starting countdown…');
+    try {
+      const state = await apiStartRace(raceSession.code);
+      raceSession.countdownRefreshTriggered = false;
+      setRaceMessage('ssRaceLobbyMessage', '');
+      activateRaceState(state);
+    } catch (error) {
+      setRaceMessage('ssRaceLobbyMessage', error.message, true);
+      button.disabled = false;
+    }
+  }
+
+  function onRaceAnswerInput(event) {
+    const state = raceSession.state;
+    const value = event.target.value.trim();
+    if (
+      !state
+      || !state.current_question
+      || state.current_answer === null
+      || state.current_answer === undefined
+      || value === ''
+      || raceSession.answerBusy
+    ) return;
+
+    // Match standard mode: wrong and partial values simply remain in the box.
+    // The server is contacted only once the typed number is exactly correct.
+    if (Number(value) === Number(state.current_answer)) {
+      submitRaceAnswer();
+    }
+  }
+
+  async function submitRaceAnswer() {
+    const state = raceSession.state;
+    const input = document.getElementById('ssRaceAnswerInput');
+    const answer = input.value.trim();
+    if (
+      !state
+      || !state.current_question
+      || state.current_answer === null
+      || state.current_answer === undefined
+      || answer === ''
+      || Number(answer) !== Number(state.current_answer)
+      || raceSession.answerBusy
+    ) return;
+
+    raceSession.answerBusy = true;
+    input.disabled = true;
+    try {
+      const nextState = await apiSubmitRaceAnswer(state.code, answer);
+      raceSession.state = nextState;
+      updateRaceServerClock(nextState);
+      if (!nextState.answer_correct) {
+        // This should only happen if the question changed between the input
+        // event and the request. Keep the typed value and refresh state.
+        activateRaceState(nextState);
+        return;
+      }
+
+      input.value = '';
+      const card = document.getElementById('ssRaceProblemCard');
+      card.classList.remove('ss-flash-wrong');
+      card.classList.add('ss-flash-correct');
+      setTimeout(() => card.classList.remove('ss-flash-correct'), 180);
+      activateRaceState(nextState);
+    } catch (error) {
+      setRaceMessage('ssRaceLobbyMessage', error.message, true);
+    } finally {
+      raceSession.answerBusy = false;
+      const latest = raceSession.state;
+      if (currentScreen === 'raceGame' && latest && latest.current_question) {
+        input.disabled = false;
+        input.focus();
+      }
+    }
+  }
+
+  async function leaveCurrentRace(destination = 'race') {
+    if (!raceSession.code) {
+      resetRaceSession();
+      showScreen(destination);
+      return;
+    }
+    const state = raceSession.state;
+    if (state && state.status === 'racing') {
+      const me = currentRacePlayer(state);
+      if (me && !me.finished_at && !confirm('Leave this live race? Your car will be removed from the track.')) return;
+    }
+    const code = raceSession.code;
+    resetRaceSession();
+    try { await apiLeaveRace(code); } catch (error) { console.warn('could not leave race cleanly', error); }
+    showScreen(destination);
+  }
+
+  async function resumeSavedRace() {
+    const code = localStorage.getItem(RACE_STORAGE_KEY);
+    if (!code) return false;
+    try {
+      const state = await apiGetRace(code);
+      activateRaceState(state);
+      return true;
+    } catch (_) {
+      localStorage.removeItem(RACE_STORAGE_KEY);
+      return false;
+    }
+  }
+
   // ---------------------------------------------------------------------
   // screen nav
   // ---------------------------------------------------------------------
   function showScreen(name) {
-    ['home', 'game', 'results', 'history'].forEach(s => {
-      document.getElementById('ssScreen' + s.charAt(0).toUpperCase() + s.slice(1))
-        .classList.toggle('ss-hidden', s !== name);
+    currentScreen = name;
+    ['home', 'race', 'career', 'raceLobby', 'raceGame', 'raceResults', 'game', 'results', 'history'].forEach(s => {
+      const screen = document.getElementById('ssScreen' + s.charAt(0).toUpperCase() + s.slice(1));
+      if (screen) screen.classList.toggle('ss-hidden', s !== name);
     });
     const tabbar = document.getElementById('ssTabbar');
-    if (tabbar) tabbar.classList.toggle('ss-hidden', name === 'game' || name === 'results');
-    document.querySelectorAll('.ss-tab').forEach(t => t.classList.toggle('ss-tab-active', t.dataset.tab === name));
+    const immersive = ['game', 'results', 'raceLobby', 'raceGame', 'raceResults'].includes(name);
+    if (tabbar) tabbar.classList.toggle('ss-hidden', immersive);
+    const activeTab = name.startsWith('race') ? 'race' : name;
+    document.querySelectorAll('.ss-tab').forEach(t => t.classList.toggle('ss-tab-active', t.dataset.tab === activeTab));
     if (name === 'home') renderHomeStats();
+    if (name === 'career') renderRaceCareer();
     if (name === 'history') renderHistoryTab();
   }
 
@@ -1027,6 +1650,49 @@
   document.getElementById('ssRunAgain').addEventListener('click', () => showScreen('home'));
   document.getElementById('ssBackHome').addEventListener('click', () => showScreen('home'));
   document.getElementById('ssAnswerInput').addEventListener('input', onAnswerInput);
+
+  document.getElementById('ssCreateRace').addEventListener('click', createRace);
+  document.querySelectorAll('[data-race-count]').forEach(button => {
+    button.addEventListener('click', () => {
+      document.getElementById('ssRaceQuestionCount').value = button.dataset.raceCount;
+      syncRaceCountPresets();
+    });
+  });
+  document.getElementById('ssRaceQuestionCount').addEventListener('input', syncRaceCountPresets);
+  document.getElementById('ssRaceQuestionCount').addEventListener('blur', event => {
+    const count = getRaceQuestionCount();
+    event.target.value = String(count === null ? 50 : count);
+    syncRaceCountPresets();
+  });
+  document.getElementById('ssJoinRace').addEventListener('click', joinRace);
+  document.getElementById('ssJoinRaceCode').addEventListener('input', event => {
+    event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+  });
+  document.getElementById('ssJoinRaceCode').addEventListener('keydown', event => {
+    if (event.key === 'Enter') joinRace();
+  });
+  document.getElementById('ssCopyRaceCode').addEventListener('click', async () => {
+    if (!raceSession.code) return;
+    try {
+      await navigator.clipboard.writeText(raceSession.code);
+      document.getElementById('ssCopyRaceCode').textContent = 'Copied!';
+      setTimeout(() => { document.getElementById('ssCopyRaceCode').textContent = 'Copy code'; }, 1200);
+    } catch (_) {
+      prompt('Copy this race code:', raceSession.code);
+    }
+  });
+  document.getElementById('ssStartRace').addEventListener('click', startMultiplayerRace);
+  document.getElementById('ssLeaveRaceLobby').addEventListener('click', () => leaveCurrentRace('race'));
+  document.getElementById('ssQuitRace').addEventListener('click', () => leaveCurrentRace('race'));
+  document.getElementById('ssRaceAnswerInput').addEventListener('input', onRaceAnswerInput);
+  document.getElementById('ssNewRace').addEventListener('click', () => {
+    resetRaceSession();
+    showScreen('race');
+  });
+  document.getElementById('ssRaceBackHome').addEventListener('click', () => {
+    resetRaceSession();
+    showScreen('home');
+  });
   document.getElementById('ssReset').addEventListener('click', async () => {
     if (!confirm('Clear all saved runs and stats for this account? This cannot be undone.')) return;
     await apiClearRuns();
@@ -1058,5 +1724,6 @@
   (async function init() {
     runs = await apiGetRuns();
     renderHomeStats();
+    await resumeSavedRace();
   })();
 })();

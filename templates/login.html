@@ -1,23 +1,65 @@
 {% extends "base.html" %}
 {% block title %}Log in — Zetamax{% endblock %}
+{% block body_class %}ss-auth-page{% endblock %}
+{% block main_class %}ss-auth-main{% endblock %}
 {% block content %}
-<div class="ss-auth-wrap">
-  <div class="ss-auth-card">
-    <div class="ss-eyebrow">zetamax</div>
-    <h1 class="ss-h1">Log in</h1>
-    <p class="ss-sub">Pick up your stats and your weak spots where you left off.</p>
-    <form method="POST" action="{{ url_for('login') }}" class="ss-auth-form">
-      <div class="ss-field">
-        <label for="username">Username</label>
-        <input class="ss-input" type="text" id="username" name="username" autocomplete="username" required autofocus />
+<div class="ss-auth-shell">
+  <section class="ss-auth-showcase" aria-label="Zetamax introduction">
+    <div class="ss-auth-showcase-inner">
+      <div class="ss-auth-badge"><span></span> Multiplayer speed math</div>
+      <h1>Build arithmetic speed.<br><em>Race your friends.</em></h1>
+      <p>Practice intelligently, uncover weak facts, and turn every correct answer into forward momentum.</p>
+
+      <div class="ss-auth-race-preview" aria-hidden="true">
+        <div class="ss-auth-road">
+          <span class="ss-auth-road-line"></span>
+          <span class="ss-auth-preview-car ss-auth-preview-car-one">🏎️</span>
+          <span class="ss-auth-preview-car ss-auth-preview-car-two">🏎️</span>
+          <span class="ss-auth-preview-flag">🏁</span>
+        </div>
+        <div class="ss-auth-preview-stats">
+          <div><strong class="ss-mono">42.8</strong><span>QPM</span></div>
+          <div><strong class="ss-mono">1st</strong><span>place</span></div>
+          <div><strong class="ss-mono">50/50</strong><span>solved</span></div>
+        </div>
       </div>
-      <div class="ss-field">
-        <label for="password">Password</label>
-        <input class="ss-input" type="password" id="password" name="password" autocomplete="current-password" required />
+    </div>
+  </section>
+
+  <section class="ss-auth-form-side">
+    <div class="ss-auth-card ss-auth-card-modern">
+      <div class="ss-auth-card-head">
+        <div class="ss-eyebrow">welcome back</div>
+        <h2>Log in to Zetamax</h2>
+        <p>Continue your practice streak and race career.</p>
       </div>
-      <button class="ss-btn ss-btn-primary ss-btn-block" type="submit">Log in</button>
-    </form>
-    <p class="ss-auth-switch">No account yet? <a href="{{ url_for('register') }}">Create one</a></p>
-  </div>
+
+      {% if google_enabled %}
+        <a class="ss-google-btn" href="{{ url_for('google_login', next=next_url) }}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.06H12v3.9h5.38a4.6 4.6 0 0 1-2 3.02v2.53h3.24c1.9-1.75 2.98-4.33 2.98-7.39Z"/><path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.38l-3.24-2.53c-.9.6-2.05.96-3.38.96-2.6 0-4.81-1.76-5.6-4.13H3.06v2.61A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.4 13.92A6.02 6.02 0 0 1 6.08 12c0-.67.11-1.32.32-1.92V7.47H3.06A10 10 0 0 0 2 12c0 1.62.39 3.15 1.06 4.53l3.34-2.61Z"/><path fill="#EA4335" d="M12 5.95c1.47 0 2.79.5 3.83 1.5l2.87-2.87A9.62 9.62 0 0 0 12 2a10 10 0 0 0-8.94 5.47l3.34 2.61c.79-2.37 3-4.13 5.6-4.13Z"/></svg>
+          <span>Continue with Google</span>
+        </a>
+        <div class="ss-auth-divider"><span>or continue with password</span></div>
+      {% endif %}
+
+      <form method="POST" action="{{ url_for('login') }}" class="ss-auth-form">
+        <input type="hidden" name="next" value="{{ next_url }}">
+        <div class="ss-field">
+          <label for="identifier">Username or email</label>
+          <input class="ss-input ss-auth-input" type="text" id="identifier" name="identifier" autocomplete="username" required autofocus placeholder="you@example.com" />
+        </div>
+        <div class="ss-field">
+          <label for="password">Password</label>
+          <input class="ss-input ss-auth-input" type="password" id="password" name="password" autocomplete="current-password" required placeholder="Enter your password" />
+        </div>
+        <button class="ss-btn ss-btn-primary ss-btn-block ss-auth-submit" type="submit">Log in</button>
+      </form>
+
+      <p class="ss-auth-switch">New to Zetamax? <a href="{{ url_for('register', next=next_url) }}">Create an account</a></p>
+      {% if not google_enabled %}
+        <p class="ss-auth-config-note">Google sign-in appears after the server owner configures Google OAuth credentials.</p>
+      {% endif %}
+    </div>
+  </section>
 </div>
 {% endblock %}

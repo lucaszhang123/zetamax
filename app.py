@@ -4,7 +4,7 @@ import random
 import sqlite3
 import secrets
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 from sklearn.tree import DecisionTreeRegressor
@@ -35,8 +35,10 @@ else:
 # ---------------------------------------------------------------------------
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(DB_PATH, timeout=10)
         g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db.execute("PRAGMA busy_timeout = 10000")
     return g.db
 
 
@@ -78,6 +80,44 @@ def init_db():
         db.execute("ALTER TABLE runs ADD COLUMN ops TEXT NOT NULL DEFAULT '[]'")
     if "ranges" not in existing_cols:
         db.execute("ALTER TABLE runs ADD COLUMN ranges TEXT NOT NULL DEFAULT '{}'")
+
+    # Multiplayer race rooms are persisted in SQLite so they work across
+    # browser tabs and across multiple Flask workers without in-memory state.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS race_rooms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            host_user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'waiting',
+            ops TEXT NOT NULL,
+            ranges TEXT NOT NULL,
+            question_count INTEGER NOT NULL DEFAULT 50,
+            questions TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            FOREIGN KEY (host_user_id) REFERENCES users (id)
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS race_players (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            wrong_attempts INTEGER NOT NULL DEFAULT 0,
+            joined_at TEXT NOT NULL,
+            finished_at TEXT,
+            elapsed_ms INTEGER,
+            last_seen TEXT NOT NULL,
+            UNIQUE (room_id, user_id),
+            FOREIGN KEY (room_id) REFERENCES race_rooms (id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_race_players_room ON race_players (room_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_race_rooms_code ON race_rooms (code)")
+    db.execute("PRAGMA journal_mode = WAL")
     db.commit()
     db.close()
 
@@ -358,6 +398,172 @@ def generate_problems(user_id, db, mode, ops, count, ranges=None, fact_ids=None)
     return problems, model_used, sample_count
 
 
+
+# ---------------------------------------------------------------------------
+# Multiplayer race helpers
+# ---------------------------------------------------------------------------
+RACE_QUESTION_COUNT = 50
+RACE_MAX_PLAYERS = 8
+RACE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(value=None):
+    value = value or utc_now()
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_utc(value):
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def clean_race_ops(raw):
+    if not isinstance(raw, list):
+        return OPS[:]
+    cleaned = []
+    for op in raw:
+        if op in OPS and op not in cleaned:
+            cleaned.append(op)
+    return cleaned or OPS[:]
+
+
+def make_race_code(db):
+    for _ in range(50):
+        code = "".join(secrets.choice(RACE_CODE_ALPHABET) for _ in range(6))
+        exists = db.execute("SELECT 1 FROM race_rooms WHERE code = ?", (code,)).fetchone()
+        if not exists:
+            return code
+    raise RuntimeError("Could not create a unique race code")
+
+
+def race_room_for_user(db, code, user_id):
+    return db.execute(
+        """
+        SELECT rr.*
+        FROM race_rooms rr
+        JOIN race_players rp ON rp.room_id = rr.id
+        WHERE rr.code = ? AND rp.user_id = ?
+        """,
+        (code, user_id),
+    ).fetchone()
+
+
+def maybe_finish_race(db, room_id):
+    counts = db.execute(
+        """
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN finished_at IS NOT NULL THEN 1 ELSE 0 END) AS finished
+        FROM race_players
+        WHERE room_id = ?
+        """,
+        (room_id,),
+    ).fetchone()
+    total = int(counts["total"] or 0)
+    finished = int(counts["finished"] or 0)
+    if total > 0 and total == finished:
+        db.execute(
+            "UPDATE race_rooms SET status = 'finished', finished_at = COALESCE(finished_at, ?) WHERE id = ?",
+            (iso_utc(), room_id),
+        )
+        return True
+    return False
+
+
+def race_state(db, room, user_id):
+    """Return only the logged-in player's current question. Answers stay on
+    the server and are validated by the answer endpoint."""
+    now = utc_now()
+    questions = json.loads(room["questions"])
+    players = db.execute(
+        """
+        SELECT rp.*, u.username
+        FROM race_players rp
+        JOIN users u ON u.id = rp.user_id
+        WHERE rp.room_id = ?
+        """,
+        (room["id"],),
+    ).fetchall()
+
+    started = parse_utc(room["started_at"])
+    elapsed_live_ms = 0
+    if started and now >= started:
+        elapsed_live_ms = max(1, int((now - started).total_seconds() * 1000))
+
+    serialized = []
+    for player in players:
+        progress = int(player["progress"])
+        elapsed_ms = player["elapsed_ms"]
+        if elapsed_ms is not None:
+            qpm = progress * 60000.0 / max(1, int(elapsed_ms))
+        elif elapsed_live_ms:
+            qpm = progress * 60000.0 / elapsed_live_ms
+        else:
+            qpm = 0.0
+        serialized.append({
+            "user_id": player["user_id"],
+            "username": player["username"],
+            "progress": progress,
+            "wrong_attempts": int(player["wrong_attempts"]),
+            "finished_at": player["finished_at"],
+            "elapsed_ms": elapsed_ms,
+            "qpm": round(qpm, 2),
+            "is_me": player["user_id"] == user_id,
+            "is_host": player["user_id"] == room["host_user_id"],
+        })
+
+    serialized.sort(key=lambda p: (
+        0 if p["finished_at"] else 1,
+        p["elapsed_ms"] if p["elapsed_ms"] is not None else -p["progress"],
+        p["username"].lower(),
+    ))
+    for index, player in enumerate(serialized, start=1):
+        player["position"] = index
+
+    me = next((player for player in serialized if player["is_me"]), None)
+    current_question = None
+    current_answer = None
+    if (
+        me
+        and room["status"] == "racing"
+        and started
+        and now >= started
+        and me["progress"] < int(room["question_count"])
+    ):
+        current_problem = questions[me["progress"]]
+        current_question = current_problem["question"]
+        # Race input follows the same client-side auto-submit behavior as the
+        # standard run: the browser waits until the typed value exactly equals
+        # the answer, then sends the one correct submission to the server.
+        current_answer = int(current_problem["answer"])
+
+    countdown_ms = 0
+    if room["status"] == "racing" and started and now < started:
+        countdown_ms = max(0, int((started - now).total_seconds() * 1000))
+
+    return {
+        "code": room["code"],
+        "status": room["status"],
+        "host_user_id": room["host_user_id"],
+        "is_host": room["host_user_id"] == user_id,
+        "ops": json.loads(room["ops"]),
+        "ranges": json.loads(room["ranges"]),
+        "question_count": int(room["question_count"]),
+        "created_at": room["created_at"],
+        "started_at": room["started_at"],
+        "finished_at": room["finished_at"],
+        "server_now": iso_utc(now),
+        "countdown_ms": countdown_ms,
+        "current_question": current_question,
+        "current_answer": current_answer,
+        "players": serialized,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
@@ -521,6 +727,258 @@ def api_delete_run(run_id):
     db.commit()
     if cur.rowcount == 0:
         return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
+
+
+
+# ---------------------------------------------------------------------------
+# Multiplayer race API
+# ---------------------------------------------------------------------------
+@app.route("/api/races", methods=["POST"])
+@login_required
+def api_create_race():
+    data = request.get_json(force=True) or {}
+    ops = clean_race_ops(data.get("ops"))
+    ranges = clean_ranges(data.get("ranges"))
+    db = get_db()
+
+    # Remove abandoned waiting rooms created by this user more than a day ago.
+    cutoff = iso_utc(utc_now() - timedelta(days=1))
+    old_rooms = db.execute(
+        "SELECT id FROM race_rooms WHERE host_user_id = ? AND status = 'waiting' AND created_at < ?",
+        (session["user_id"], cutoff),
+    ).fetchall()
+    for old in old_rooms:
+        db.execute("DELETE FROM race_rooms WHERE id = ?", (old["id"],))
+
+    questions, _, _ = generate_problems(
+        session["user_id"], db, "standard", ops, RACE_QUESTION_COUNT, ranges
+    )
+    code = make_race_code(db)
+    now = iso_utc()
+    cur = db.execute(
+        """
+        INSERT INTO race_rooms
+            (code, host_user_id, status, ops, ranges, question_count, questions, created_at)
+        VALUES (?, ?, 'waiting', ?, ?, ?, ?, ?)
+        """,
+        (
+            code,
+            session["user_id"],
+            json.dumps(ops),
+            json.dumps(ranges),
+            RACE_QUESTION_COUNT,
+            json.dumps(questions),
+            now,
+        ),
+    )
+    room_id = cur.lastrowid
+    db.execute(
+        """
+        INSERT INTO race_players (room_id, user_id, joined_at, last_seen)
+        VALUES (?, ?, ?, ?)
+        """,
+        (room_id, session["user_id"], now, now),
+    )
+    db.commit()
+    room = db.execute("SELECT * FROM race_rooms WHERE id = ?", (room_id,)).fetchone()
+    return jsonify(race_state(db, room, session["user_id"])), 201
+
+
+@app.route("/api/races/join", methods=["POST"])
+@login_required
+def api_join_race():
+    data = request.get_json(force=True) or {}
+    code = str(data.get("code", "")).strip().upper()
+    if len(code) != 6:
+        return jsonify({"error": "Enter a valid 6-character race code."}), 400
+
+    db = get_db()
+    room = db.execute("SELECT * FROM race_rooms WHERE code = ?", (code,)).fetchone()
+    if room is None:
+        return jsonify({"error": "Race not found. Check the code and try again."}), 404
+
+    existing = db.execute(
+        "SELECT 1 FROM race_players WHERE room_id = ? AND user_id = ?",
+        (room["id"], session["user_id"]),
+    ).fetchone()
+    if existing:
+        return jsonify(race_state(db, room, session["user_id"]))
+    if room["status"] != "waiting":
+        return jsonify({"error": "That race has already started."}), 409
+
+    count = db.execute(
+        "SELECT COUNT(*) AS n FROM race_players WHERE room_id = ?", (room["id"],)
+    ).fetchone()["n"]
+    if int(count) >= RACE_MAX_PLAYERS:
+        return jsonify({"error": f"That race is full ({RACE_MAX_PLAYERS} players)."}), 409
+
+    now = iso_utc()
+    db.execute(
+        "INSERT INTO race_players (room_id, user_id, joined_at, last_seen) VALUES (?, ?, ?, ?)",
+        (room["id"], session["user_id"], now, now),
+    )
+    db.commit()
+    return jsonify(race_state(db, room, session["user_id"])), 201
+
+
+@app.route("/api/races/<code>", methods=["GET"])
+@login_required
+def api_get_race(code):
+    db = get_db()
+    code = code.strip().upper()
+    room = race_room_for_user(db, code, session["user_id"])
+    if room is None:
+        return jsonify({"error": "Race not found or you are not in it."}), 404
+    db.execute(
+        "UPDATE race_players SET last_seen = ? WHERE room_id = ? AND user_id = ?",
+        (iso_utc(), room["id"], session["user_id"]),
+    )
+    db.commit()
+    room = db.execute("SELECT * FROM race_rooms WHERE id = ?", (room["id"],)).fetchone()
+    return jsonify(race_state(db, room, session["user_id"]))
+
+
+@app.route("/api/races/<code>/start", methods=["POST"])
+@login_required
+def api_start_race(code):
+    db = get_db()
+    code = code.strip().upper()
+    room = race_room_for_user(db, code, session["user_id"])
+    if room is None:
+        return jsonify({"error": "Race not found or you are not in it."}), 404
+    if room["host_user_id"] != session["user_id"]:
+        return jsonify({"error": "Only the host can start the race."}), 403
+    if room["status"] != "waiting":
+        return jsonify({"error": "This race has already started."}), 409
+
+    started_at = iso_utc(utc_now() + timedelta(seconds=4))
+    db.execute(
+        "UPDATE race_rooms SET status = 'racing', started_at = ? WHERE id = ?",
+        (started_at, room["id"]),
+    )
+    db.execute(
+        """
+        UPDATE race_players
+        SET progress = 0, wrong_attempts = 0, finished_at = NULL, elapsed_ms = NULL
+        WHERE room_id = ?
+        """,
+        (room["id"],),
+    )
+    db.commit()
+    room = db.execute("SELECT * FROM race_rooms WHERE id = ?", (room["id"],)).fetchone()
+    return jsonify(race_state(db, room, session["user_id"]))
+
+
+@app.route("/api/races/<code>/answer", methods=["POST"])
+@login_required
+def api_answer_race(code):
+    data = request.get_json(force=True) or {}
+    try:
+        submitted = int(str(data.get("answer", "")).strip())
+    except (TypeError, ValueError):
+        return jsonify({"error": "Enter a whole-number answer."}), 400
+
+    db = get_db()
+    code = code.strip().upper()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        room = race_room_for_user(db, code, session["user_id"])
+        if room is None:
+            db.rollback()
+            return jsonify({"error": "Race not found or you are not in it."}), 404
+        if room["status"] != "racing":
+            db.rollback()
+            return jsonify({"error": "This race is not currently running."}), 409
+
+        started = parse_utc(room["started_at"])
+        now = utc_now()
+        if started is None or now < started:
+            db.rollback()
+            return jsonify({"error": "The countdown is still running."}), 409
+
+        player = db.execute(
+            "SELECT * FROM race_players WHERE room_id = ? AND user_id = ?",
+            (room["id"], session["user_id"]),
+        ).fetchone()
+        progress = int(player["progress"])
+        question_count = int(room["question_count"])
+        if progress >= question_count or player["finished_at"]:
+            db.commit()
+            state = race_state(db, room, session["user_id"])
+            state["answer_correct"] = True
+            return jsonify(state)
+
+        questions = json.loads(room["questions"])
+        correct = submitted == int(questions[progress]["answer"])
+        if not correct:
+            db.execute(
+                """
+                UPDATE race_players
+                SET wrong_attempts = wrong_attempts + 1, last_seen = ?
+                WHERE room_id = ? AND user_id = ?
+                """,
+                (iso_utc(now), room["id"], session["user_id"]),
+            )
+            db.commit()
+            room = db.execute("SELECT * FROM race_rooms WHERE id = ?", (room["id"],)).fetchone()
+            state = race_state(db, room, session["user_id"])
+            state["answer_correct"] = False
+            return jsonify(state)
+
+        new_progress = progress + 1
+        finished_at = None
+        elapsed_ms = None
+        if new_progress >= question_count:
+            finished_at = iso_utc(now)
+            elapsed_ms = max(1, int((now - started).total_seconds() * 1000))
+
+        db.execute(
+            """
+            UPDATE race_players
+            SET progress = ?, finished_at = ?, elapsed_ms = ?, last_seen = ?
+            WHERE room_id = ? AND user_id = ?
+            """,
+            (
+                new_progress,
+                finished_at,
+                elapsed_ms,
+                iso_utc(now),
+                room["id"],
+                session["user_id"],
+            ),
+        )
+        maybe_finish_race(db, room["id"])
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    room = db.execute("SELECT * FROM race_rooms WHERE id = ?", (room["id"],)).fetchone()
+    state = race_state(db, room, session["user_id"])
+    state["answer_correct"] = True
+    return jsonify(state)
+
+
+@app.route("/api/races/<code>/leave", methods=["POST"])
+@login_required
+def api_leave_race(code):
+    db = get_db()
+    code = code.strip().upper()
+    room = race_room_for_user(db, code, session["user_id"])
+    if room is None:
+        return jsonify({"ok": True})
+
+    if room["status"] == "waiting" and room["host_user_id"] == session["user_id"]:
+        db.execute("DELETE FROM race_rooms WHERE id = ?", (room["id"],))
+    else:
+        db.execute(
+            "DELETE FROM race_players WHERE room_id = ? AND user_id = ?",
+            (room["id"], session["user_id"]),
+        )
+        if room["status"] == "racing":
+            maybe_finish_race(db, room["id"])
+    db.commit()
     return jsonify({"ok": True})
 
 

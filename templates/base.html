@@ -3,18 +3,27 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
   <title>{% block title %}Zetamax{% endblock %}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   <nav class="ss-nav">
-    <a class="ss-nav-brand" href="{{ url_for('index') if session.get('user_id') else url_for('login') }}">zetamax</a>
+    <a class="ss-nav-brand" href="{{ url_for('index') if session.get('user_id') else url_for('login') }}">
+      <span class="ss-brand-mark" aria-hidden="true">z</span>
+      <span>zetamax</span>
+    </a>
     {% if session.get('user_id') %}
       <div class="ss-nav-right">
         <span class="ss-nav-user">{{ session.get('username') }}</span>
         <a class="ss-nav-link" href="{{ url_for('logout') }}">Log out</a>
+      </div>
+    {% else %}
+      <div class="ss-nav-right ss-auth-nav-right">
+        <span class="ss-nav-user">Fast math. Faster thinking.</span>
       </div>
     {% endif %}
   </nav>
@@ -23,13 +32,13 @@
     {% if messages %}
       <div class="ss-flash-wrap">
         {% for m in messages %}
-          <div class="ss-flash">{{ m }}</div>
+          <div class="ss-flash" role="alert">{{ m }}</div>
         {% endfor %}
       </div>
     {% endif %}
   {% endwith %}
 
-  <main class="ss-main">
+  <main class="ss-main {% block main_class %}{% endblock %}">
     {% block content %}{% endblock %}
   </main>
 </body>
