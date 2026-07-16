@@ -16,8 +16,8 @@
     <h1 class="ss-h1">Speed math practice</h1>
     <p class="ss-sub">Timed arithmetic, scored like a scoreboard. Practice mode learns which problems slow you down.</p>
 
-    <div class="ss-panel">
-      <div class="ss-panel-title">Run setup</div>
+    <div class="ss-panel ss-panel-featured" id="ssRunSetupPanel">
+      <div class="ss-panel-title"><span>Run setup</span><span class="ss-panel-kicker">adaptive practice</span></div>
 
       <div class="ss-op-config">
         <div class="ss-op-row">
@@ -68,7 +68,7 @@
       <div class="ss-sub" style="margin:10px 0 0 0;" id="ssImproveGateNote">Loading…</div>
     </div>
 
-    <div class="ss-panel">
+    <div class="ss-panel" id="ssStatsPanel">
       <div class="ss-panel-title">
         <span>Your stats</span>
         <button class="ss-btn ss-btn-danger" id="ssReset" style="padding:4px 10px; font-size:11px;">Clear data</button>
@@ -205,17 +205,25 @@
     </div>
 
     <div class="ss-panel ss-race-track-panel">
-      <div class="ss-panel-title">Live positions</div>
+      <div class="ss-panel-title ss-race-panel-title">
+        <span>Live positions</span>
+        <span class="ss-race-window-note" id="ssRaceWindowNote">Camera follows your car</span>
+      </div>
       <div class="ss-race-track-list" id="ssRaceTrackList"></div>
     </div>
 
     <div class="ss-race-countdown ss-hidden" id="ssRaceCountdown" aria-live="polite">4</div>
 
     <div class="ss-problem-card ss-race-problem-card" id="ssRaceProblemCard">
+      <div class="ss-race-question-label">Current question</div>
       <div class="ss-problem-text" id="ssRaceProblemText">Get ready…</div>
-      <div class="ss-race-answer-hint">Answers submit automatically as soon as they are correct.</div>
+      <div class="ss-race-answer-hint"><span class="ss-live-dot"></span> Answers submit automatically the instant they are correct.</div>
     </div>
-    <input class="ss-answer-input" id="ssRaceAnswerInput" type="text" inputmode="numeric" autocomplete="off" disabled>
+    <div class="ss-race-answer-shell">
+      <span class="ss-race-equals" aria-hidden="true">=</span>
+      <input class="ss-answer-input" id="ssRaceAnswerInput" type="text" inputmode="numeric" autocomplete="off" disabled aria-label="Race answer">
+      <span class="ss-race-auto-label">auto-submit</span>
+    </div>
 
     <div class="ss-game-footer">
       <span id="ssRaceMistakes">mistakes 0</span>

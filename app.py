@@ -1,10 +1,12 @@
 import os
 import json
 import random
+import re
 import sqlite3
 import secrets
 from functools import wraps
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import numpy as np
 from sklearn.tree import DecisionTreeRegressor
@@ -15,10 +17,25 @@ from flask import (
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 
+try:
+    from authlib.integrations.flask_client import OAuth
+except ImportError:  # The rest of the app still works before Authlib is installed.
+    OAuth = None
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "app.db")
 
 app = Flask(__name__)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
 # Persist the secret key across restarts so sessions don't get invalidated
 SECRET_FILE = os.path.join(BASE_DIR, ".secret_key")
 if os.path.exists(SECRET_FILE):
@@ -28,6 +45,28 @@ else:
     with open(SECRET_FILE, "w") as f:
         f.write(key)
     app.secret_key = key
+
+
+# ---------------------------------------------------------------------------
+# Optional Google OpenID Connect login
+#
+# Configure these as environment variables. The app remains usable with local
+# username/password accounts when they are absent.
+# ---------------------------------------------------------------------------
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "").strip()
+google = None
+
+if OAuth is not None and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
+    oauth = OAuth(app)
+    google = oauth.register(
+        name="google",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email profile"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +98,23 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+    user_cols = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+    if "email" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN email TEXT")
+    if "google_sub" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
+    if "auth_provider" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'local'")
+    if "avatar_url" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN avatar_url TEXT")
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique "
+        "ON users (lower(email)) WHERE email IS NOT NULL"
+    )
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub_unique "
+        "ON users (google_sub) WHERE google_sub IS NOT NULL"
+    )
     db.execute("""
         CREATE TABLE IF NOT EXISTS runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -402,7 +458,9 @@ def generate_problems(user_id, db, mode, ops, count, ranges=None, fact_ids=None)
 # ---------------------------------------------------------------------------
 # Multiplayer race helpers
 # ---------------------------------------------------------------------------
-RACE_QUESTION_COUNT = 50
+RACE_DEFAULT_QUESTION_COUNT = 50
+RACE_MIN_QUESTION_COUNT = 5
+RACE_MAX_QUESTION_COUNT = 200
 RACE_MAX_PLAYERS = 8
 RACE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
@@ -430,6 +488,14 @@ def clean_race_ops(raw):
         if op in OPS and op not in cleaned:
             cleaned.append(op)
     return cleaned or OPS[:]
+
+
+def clean_race_question_count(raw):
+    try:
+        count = int(raw)
+    except (TypeError, ValueError):
+        count = RACE_DEFAULT_QUESTION_COUNT
+    return max(RACE_MIN_QUESTION_COUNT, min(count, RACE_MAX_QUESTION_COUNT))
 
 
 def make_race_code(db):
@@ -576,67 +642,218 @@ def login_required(view):
     return wrapped
 
 
+@app.context_processor
+def inject_auth_config():
+    return {"google_enabled": google is not None}
+
+
+def safe_next_url(value):
+    """Allow only same-site relative redirects after login."""
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme or parsed.netloc or not value.startswith("/"):
+        return None
+    return value
+
+
+def sign_in_user(user):
+    session.clear()
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+
+
+def normalize_email(value):
+    return str(value or "").strip().lower()
+
+
+def unique_username(db, preferred, email=""):
+    base = preferred or email.split("@", 1)[0] or "racer"
+    base = re.sub(r"[^A-Za-z0-9_]", "", base).strip("_")
+    if len(base) < 3:
+        base = f"racer{base}"
+    base = base[:24]
+    candidate = base
+    suffix = 2
+    while db.execute("SELECT 1 FROM users WHERE username = ?", (candidate,)).fetchone():
+        tail = str(suffix)
+        candidate = f"{base[:max(3, 24 - len(tail))]}{tail}"
+        suffix += 1
+    return candidate
+
+
 # ---------------------------------------------------------------------------
 # Auth routes
 # ---------------------------------------------------------------------------
 @app.route("/register", methods=["GET", "POST"])
 def register():
+    if "user_id" in session:
+        return redirect(url_for("index"))
+
+    next_url = safe_next_url(request.args.get("next"))
     if request.method == "POST":
         username = request.form.get("username", "").strip()
+        email = normalize_email(request.form.get("email"))
         password = request.form.get("password", "")
         confirm = request.form.get("confirm", "")
+        next_url = safe_next_url(request.form.get("next")) or next_url
 
         if len(username) < 3:
             flash("Username must be at least 3 characters.")
-        elif len(password) < 6:
-            flash("Password must be at least 6 characters.")
+        elif not re.fullmatch(r"[A-Za-z0-9_]+", username):
+            flash("Username can use letters, numbers, and underscores only.")
+        elif "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+            flash("Enter a valid email address.")
+        elif len(password) < 8:
+            flash("Password must be at least 8 characters.")
         elif password != confirm:
             flash("Passwords don't match.")
         else:
             db = get_db()
-            existing = db.execute(
-                "SELECT id FROM users WHERE username = ?", (username,)
+            existing_username = db.execute(
+                "SELECT id FROM users WHERE lower(username) = lower(?)", (username,)
             ).fetchone()
-            if existing:
+            existing_email = db.execute(
+                "SELECT id FROM users WHERE lower(email) = lower(?)", (email,)
+            ).fetchone()
+            if existing_username:
                 flash("That username is already taken.")
+            elif existing_email:
+                flash("An account already exists with that email address.")
             else:
                 db.execute(
-                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                    (username, generate_password_hash(password), datetime.utcnow().isoformat()),
+                    """
+                    INSERT INTO users
+                        (username, password_hash, created_at, email, auth_provider)
+                    VALUES (?, ?, ?, ?, 'local')
+                    """,
+                    (username, generate_password_hash(password), iso_utc(), email),
                 )
                 db.commit()
                 user = db.execute(
-                    "SELECT id FROM users WHERE username = ?", (username,)
+                    "SELECT * FROM users WHERE lower(username) = lower(?)", (username,)
                 ).fetchone()
-                session.clear()
-                session["user_id"] = user["id"]
-                session["username"] = username
-                return redirect(url_for("index"))
+                sign_in_user(user)
+                return redirect(next_url or url_for("index"))
 
-    return render_template("register.html")
+    return render_template("register.html", next_url=next_url or "")
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    if "user_id" in session:
+        return redirect(url_for("index"))
+
+    next_url = safe_next_url(request.args.get("next"))
     if request.method == "POST":
-        username = request.form.get("username", "").strip()
+        identifier = request.form.get("identifier", "").strip()
         password = request.form.get("password", "")
+        next_url = safe_next_url(request.form.get("next")) or next_url
 
         db = get_db()
         user = db.execute(
-            "SELECT * FROM users WHERE username = ?", (username,)
+            """
+            SELECT * FROM users
+            WHERE lower(username) = lower(?) OR lower(email) = lower(?)
+            LIMIT 1
+            """,
+            (identifier, identifier),
         ).fetchone()
 
         if user is None or not check_password_hash(user["password_hash"], password):
-            flash("Incorrect username or password.")
+            flash("Incorrect username, email, or password.")
         else:
-            session.clear()
-            session["user_id"] = user["id"]
-            session["username"] = user["username"]
-            next_url = request.args.get("next") or url_for("index")
-            return redirect(next_url)
+            sign_in_user(user)
+            return redirect(next_url or url_for("index"))
 
-    return render_template("login.html")
+    return render_template("login.html", next_url=next_url or "")
+
+
+@app.route("/auth/google")
+def google_login():
+    if google is None:
+        flash("Google sign-in is not configured on this server yet.")
+        return redirect(url_for("login"))
+
+    session["oauth_next"] = safe_next_url(request.args.get("next"))
+    redirect_uri = GOOGLE_REDIRECT_URI or url_for("google_callback", _external=True)
+    return google.authorize_redirect(redirect_uri)
+
+
+@app.route("/auth/google/callback")
+def google_callback():
+    if google is None:
+        flash("Google sign-in is not configured on this server yet.")
+        return redirect(url_for("login"))
+
+    try:
+        token = google.authorize_access_token()
+        userinfo = token["userinfo"]
+    except Exception:
+        app.logger.exception("Google sign-in failed")
+        flash("Google sign-in could not be completed. Please try again.")
+        return redirect(url_for("login"))
+
+    google_sub = str(userinfo.get("sub", "")).strip()
+    email = normalize_email(userinfo.get("email"))
+    verified = bool(userinfo.get("email_verified"))
+    if not google_sub or not email or not verified:
+        flash("Google did not provide a verified email address.")
+        return redirect(url_for("login"))
+
+    db = get_db()
+    user = db.execute(
+        "SELECT * FROM users WHERE google_sub = ?", (google_sub,)
+    ).fetchone()
+
+    if user is None:
+        # Link to an existing local account that registered the same verified
+        # email; otherwise create a new Google-backed account.
+        user = db.execute(
+            "SELECT * FROM users WHERE lower(email) = lower(?)", (email,)
+        ).fetchone()
+        avatar_url = str(userinfo.get("picture", "")).strip() or None
+        if user is not None:
+            provider = user["auth_provider"] or "local"
+            if "google" not in provider:
+                provider = f"{provider}+google"
+            db.execute(
+                """
+                UPDATE users
+                SET google_sub = ?, auth_provider = ?, avatar_url = COALESCE(?, avatar_url)
+                WHERE id = ?
+                """,
+                (google_sub, provider, avatar_url, user["id"]),
+            )
+        else:
+            username = unique_username(
+                db,
+                str(userinfo.get("given_name") or userinfo.get("name") or ""),
+                email,
+            )
+            db.execute(
+                """
+                INSERT INTO users
+                    (username, password_hash, created_at, email, google_sub, auth_provider, avatar_url)
+                VALUES (?, ?, ?, ?, ?, 'google', ?)
+                """,
+                (
+                    username,
+                    generate_password_hash(secrets.token_urlsafe(32)),
+                    iso_utc(),
+                    email,
+                    google_sub,
+                    avatar_url,
+                ),
+            )
+        db.commit()
+        user = db.execute(
+            "SELECT * FROM users WHERE google_sub = ?", (google_sub,)
+        ).fetchone()
+
+    next_url = session.get("oauth_next")
+    sign_in_user(user)
+    return redirect(next_url or url_for("index"))
 
 
 @app.route("/logout")
@@ -740,6 +957,7 @@ def api_create_race():
     data = request.get_json(force=True) or {}
     ops = clean_race_ops(data.get("ops"))
     ranges = clean_ranges(data.get("ranges"))
+    question_count = clean_race_question_count(data.get("question_count"))
     db = get_db()
 
     # Remove abandoned waiting rooms created by this user more than a day ago.
@@ -752,7 +970,7 @@ def api_create_race():
         db.execute("DELETE FROM race_rooms WHERE id = ?", (old["id"],))
 
     questions, _, _ = generate_problems(
-        session["user_id"], db, "standard", ops, RACE_QUESTION_COUNT, ranges
+        session["user_id"], db, "standard", ops, question_count, ranges
     )
     code = make_race_code(db)
     now = iso_utc()
@@ -767,7 +985,7 @@ def api_create_race():
             session["user_id"],
             json.dumps(ops),
             json.dumps(ranges),
-            RACE_QUESTION_COUNT,
+            question_count,
             json.dumps(questions),
             now,
         ),
@@ -980,6 +1198,97 @@ def api_leave_race(code):
             maybe_finish_race(db, room["id"])
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/race_career", methods=["GET"])
+@login_required
+def api_race_career():
+    """Aggregate completed race performance for the signed-in user.
+
+    Stats are derived from race_players so old races automatically appear in
+    the career page without maintaining a second summary table. A win requires
+    at least two racers and the fastest completion time in the room.
+    """
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT
+            rr.id AS room_id,
+            rr.code,
+            rr.question_count,
+            rr.ops,
+            rr.started_at,
+            COALESCE(rr.finished_at, rp.finished_at) AS completed_at,
+            rp.id AS player_id,
+            rp.elapsed_ms,
+            rp.wrong_attempts,
+            (
+                SELECT COUNT(*)
+                FROM race_players all_players
+                WHERE all_players.room_id = rr.id
+            ) AS racer_count,
+            (
+                SELECT 1 + COUNT(*)
+                FROM race_players faster
+                WHERE faster.room_id = rr.id
+                  AND faster.elapsed_ms IS NOT NULL
+                  AND (
+                    faster.elapsed_ms < rp.elapsed_ms
+                    OR (faster.elapsed_ms = rp.elapsed_ms AND faster.id < rp.id)
+                  )
+            ) AS place
+        FROM race_players rp
+        JOIN race_rooms rr ON rr.id = rp.room_id
+        WHERE rp.user_id = ?
+          AND rp.finished_at IS NOT NULL
+          AND rp.elapsed_ms IS NOT NULL
+        ORDER BY COALESCE(rr.finished_at, rp.finished_at) DESC
+        """,
+        (session["user_id"],),
+    ).fetchall()
+
+    recent = []
+    qpms = []
+    wins = 0
+    multiplayer_races = 0
+    for row in rows:
+        elapsed_ms = max(1, int(row["elapsed_ms"]))
+        question_count = int(row["question_count"])
+        qpm = question_count * 60000.0 / elapsed_ms
+        racer_count = int(row["racer_count"] or 0)
+        place = int(row["place"] or 1)
+        is_multiplayer = racer_count >= 2
+        won = is_multiplayer and place == 1
+        if is_multiplayer:
+            multiplayer_races += 1
+        if won:
+            wins += 1
+        qpms.append(qpm)
+        if len(recent) < 20:
+            recent.append({
+                "code": row["code"],
+                "question_count": question_count,
+                "ops": json.loads(row["ops"]),
+                "completed_at": row["completed_at"],
+                "elapsed_ms": elapsed_ms,
+                "wrong_attempts": int(row["wrong_attempts"] or 0),
+                "racer_count": racer_count,
+                "place": place,
+                "won": won,
+                "qpm": round(qpm, 2),
+            })
+
+    average_qpm = sum(qpms) / len(qpms) if qpms else 0.0
+    best_qpm = max(qpms) if qpms else 0.0
+    return jsonify({
+        "races_completed": len(rows),
+        "multiplayer_races": multiplayer_races,
+        "wins": wins,
+        "win_rate": round((wins / multiplayer_races * 100.0), 1) if multiplayer_races else 0.0,
+        "average_qpm": round(average_qpm, 2),
+        "best_qpm": round(best_qpm, 2),
+        "recent": recent,
+    })
 
 
 @app.route("/api/next_problems", methods=["POST"])

@@ -997,6 +997,7 @@
     answerBusy: false,
     serverOffsetMs: 0,
     lastProgress: null,
+    lastTrackProgress: null,
     countdownRefreshTriggered: false,
   };
 
@@ -1221,7 +1222,36 @@
     return Date.now() + raceSession.serverOffsetMs;
   }
 
-  function renderRaceTracks(players, targetId, questionCount) {
+  function stableRaceHue(value) {
+    let hash = 0;
+    const text = String(value || 'racer');
+    for (let i = 0; i < text.length; i++) hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    return ((hash % 360) + 360) % 360;
+  }
+
+  function raceCarSvg() {
+    return `<svg class="ss-race-car-svg" viewBox="0 0 154 66" aria-hidden="true" focusable="false">
+      <ellipse class="ss-car-ground-shadow" cx="79" cy="57" rx="62" ry="7"></ellipse>
+      <g class="ss-car-body-group">
+        <path class="ss-car-rear-wing" d="M19 27h26l8 7H17z"></path>
+        <path class="ss-car-main" d="M29 39c7-15 20-23 41-25h28c12 2 22 9 30 20l14 6c5 2 8 6 8 12H10c1-7 7-11 19-13Z"></path>
+        <path class="ss-car-cockpit" d="M65 17h31c9 2 17 7 24 16H52c4-8 8-13 13-16Z"></path>
+        <path class="ss-car-window" d="M69 20h25c7 2 13 5 18 10H58c3-5 7-8 11-10Z"></path>
+        <path class="ss-car-highlight" d="M36 37c18-7 46-10 86-5l9 7H31Z"></path>
+        <path class="ss-car-nose" d="M124 35l21 7c5 2 8 5 9 9h-31Z"></path>
+        <rect class="ss-car-bumper" x="9" y="46" width="137" height="7" rx="3"></rect>
+        <circle class="ss-car-headlight" cx="137" cy="42" r="3"></circle>
+      </g>
+      <g transform="translate(42 51)"><g class="ss-car-wheel ss-car-wheel-rear">
+        <circle r="13"></circle><circle class="ss-car-rim" r="7"></circle><path class="ss-car-spoke" d="M0-6V6M-6 0H6M-4-4 4 4M4-4-4 4"></path>
+      </g></g>
+      <g transform="translate(119 51)"><g class="ss-car-wheel ss-car-wheel-front">
+        <circle r="13"></circle><circle class="ss-car-rim" r="7"></circle><path class="ss-car-spoke" d="M0-6V6M-6 0H6M-4-4 4 4M4-4-4 4"></path>
+      </g></g>
+    </svg>`;
+  }
+
+  function renderRaceTracks(players, targetId, questionCount, options = {}) {
     const target = document.getElementById(targetId);
     if (!target) return;
     if (!players || !players.length) {
@@ -1229,25 +1259,101 @@
       return;
     }
 
-    target.innerHTML = players.map((player, index) => {
-      const pct = Math.max(0, Math.min(100, (player.progress / questionCount) * 100));
-      const finished = player.progress >= questionCount;
+    const total = Math.max(1, Number(questionCount) || 1);
+    const finalView = Boolean(options.finalView);
+    const liveView = Boolean(options.live) && !finalView;
+    const me = players.find(player => player.is_me) || players[0];
+    const focusProgress = Math.max(0, Math.min(total, Number(me.progress) || 0));
+    const windowQuestions = Math.max(1, Math.ceil(total * 0.05));
+    const overallRatio = focusProgress / total;
+    const cameraAnchor = 31 + (overallRatio * 39); // your car gradually moves from 31% to 70%
+    const previousTrackProgress = raceSession.lastTrackProgress;
+
+    let visiblePlayers;
+    let offscreenAhead = 0;
+    let offscreenBehind = 0;
+
+    if (finalView) {
+      visiblePlayers = [...players].sort((a, b) => {
+        if (a.finished_at && b.finished_at) return Number(a.position || 999) - Number(b.position || 999);
+        if (a.finished_at) return -1;
+        if (b.finished_at) return 1;
+        return Number(b.progress || 0) - Number(a.progress || 0);
+      });
+    } else {
+      visiblePlayers = players
+        .filter(player => player.is_me || Math.abs((Number(player.progress) || 0) - focusProgress) <= windowQuestions)
+        .sort((a, b) => Number(b.progress || 0) - Number(a.progress || 0));
+      offscreenAhead = players.filter(player => (Number(player.progress) || 0) > focusProgress + windowQuestions).length;
+      offscreenBehind = players.filter(player => (Number(player.progress) || 0) < focusProgress - windowQuestions).length;
+    }
+
+    const remaining = Math.max(0, total - focusProgress);
+    const showFinish = finalView || remaining <= windowQuestions;
+    const finishX = finalView
+      ? 94
+      : cameraAnchor + ((remaining / windowQuestions) * (96 - cameraAnchor));
+    const qpm = Number(me.qpm || 0);
+    const roadSpeed = Math.max(.48, Math.min(1.15, 1.22 - (qpm / 105)));
+    const skySpeed = Math.max(8, roadSpeed * 18);
+
+    const hiddenParts = [];
+    if (offscreenAhead) hiddenParts.push(`${offscreenAhead} racer${offscreenAhead === 1 ? '' : 's'} ahead`);
+    if (offscreenBehind) hiddenParts.push(`${offscreenBehind} racer${offscreenBehind === 1 ? '' : 's'} behind`);
+    const cameraContext = finalView
+      ? 'Full finishing field'
+      : (hiddenParts.length ? hiddenParts.join(' · ') : 'Every nearby racer is in view');
+
+    const rows = visiblePlayers.map((player, index) => {
+      const progress = Math.max(0, Math.min(total, Number(player.progress) || 0));
+      const finished = progress >= total;
+      const pct = progress / total;
+      const carX = finalView
+        ? 5 + (pct * 89)
+        : Math.max(5, Math.min(95, cameraAnchor + (((progress - focusProgress) / windowQuestions) * 42)));
       const detail = finished
         ? `${fmtRaceTime(player.elapsed_ms)} · ${Number(player.qpm || 0).toFixed(1)} QPM`
-        : `${player.progress}/${questionCount}`;
-      return `
-        <div class="ss-race-lane ${player.is_me ? 'ss-race-lane-me' : ''}">
-          <div class="ss-race-lane-name">
-            <span>${escapeHtml(player.username)}${player.is_host ? ' <span class="ss-race-host-tag">host</span>' : ''}</span>
-            <span class="ss-mono">${detail}</span>
-          </div>
-          <div class="ss-race-road">
-            <div class="ss-race-road-lines"></div>
-            <div class="ss-race-finish-line" aria-hidden="true"></div>
-            <div class="ss-race-car ${finished ? 'ss-race-car-finished' : ''}" style="left:${pct}%; --lane:${index};" aria-label="${escapeHtml(player.username)} race car">🏎️</div>
-          </div>
-        </div>`;
+        : `${progress}/${total}`;
+      const hue = player.is_me ? 191 : stableRaceHue(player.username);
+      const boosted = liveView && player.is_me && previousTrackProgress !== null && progress > previousTrackProgress;
+
+      return `<div class="ss-race-competitor ${player.is_me ? 'ss-race-competitor-me' : ''} ${finished ? 'ss-race-competitor-finished' : ''}">
+        <span class="ss-race-lane-rank ss-mono">${player.finished_at ? ordinal(player.position) : `P${index + 1}`}</span>
+        <div class="ss-race-nameplate" style="left:${carX}%">
+          <strong>${escapeHtml(player.username)}${player.is_host ? '<span class="ss-race-host-tag">host</span>' : ''}</strong>
+          <span class="ss-mono">${detail}</span>
+        </div>
+        <div class="ss-race-car-shell ${player.is_me ? 'ss-race-car-me' : ''} ${boosted ? 'ss-race-car-boost' : ''} ${finished ? 'ss-race-car-finished' : ''}" style="left:${carX}%; --car-hue:${hue}; color:hsl(${hue} 82% 60%);">
+          <span class="ss-race-exhaust" aria-hidden="true"></span>
+          ${raceCarSvg()}
+        </div>
+      </div>`;
     }).join('');
+
+    target.innerHTML = `<div class="ss-race-camera ${liveView ? 'ss-race-camera-live' : 'ss-race-camera-final'}" style="--road-speed:${roadSpeed.toFixed(2)}s; --sky-speed:${skySpeed.toFixed(2)}s; --visible-racers:${visiblePlayers.length}; --camera-height:${116 + (visiblePlayers.length * 84)}px;">
+      <div class="ss-race-scenery ss-race-scenery-stars" aria-hidden="true"></div>
+      <div class="ss-race-scenery ss-race-scenery-mountains" aria-hidden="true"></div>
+      <div class="ss-race-scenery ss-race-scenery-city" aria-hidden="true"></div>
+      <div class="ss-race-camera-hud">
+        <span><i class="ss-live-dot"></i>${finalView ? 'Race replay' : 'Live camera'}</span>
+        <strong>${escapeHtml(cameraContext)}</strong>
+      </div>
+      <div class="ss-race-course">
+        ${showFinish ? `<div class="ss-race-finish-zoom" style="left:${Math.max(6, Math.min(96, finishX))}%" aria-label="Finish line"><span>FINISH</span></div>` : ''}
+        ${rows}
+      </div>
+      <div class="ss-race-camera-scale">
+        <span>${finalView ? 'START' : `−${windowQuestions}Q`}</span>
+        <strong>${finalView ? `${total} QUESTIONS` : `YOU · ${focusProgress}/${total}`}</strong>
+        <span>${finalView ? 'FINISH' : `+${windowQuestions}Q`}</span>
+      </div>
+    </div>`;
+
+    if (liveView) {
+      raceSession.lastTrackProgress = focusProgress;
+      const note = document.getElementById('ssRaceWindowNote');
+      if (note) note.textContent = `Focused within ±${windowQuestions} question${windowQuestions === 1 ? '' : 's'}`;
+    }
   }
 
   function renderRaceLobby(state) {
@@ -1281,7 +1387,7 @@
     document.getElementById('ssRaceProgress').textContent = `${me.progress} / ${state.question_count}`;
     document.getElementById('ssRaceLiveQpm').textContent = Number(me.qpm || 0).toFixed(1);
     document.getElementById('ssRaceMistakes').textContent = `mistakes ${me.wrong_attempts}`;
-    renderRaceTracks(state.players, 'ssRaceTrackList', state.question_count);
+    renderRaceTracks(state.players, 'ssRaceTrackList', state.question_count, { live: true });
 
     const problemText = document.getElementById('ssRaceProblemText');
     const input = document.getElementById('ssRaceAnswerInput');
@@ -1314,7 +1420,7 @@
     document.getElementById('ssRaceResultPlace').textContent = me.finished_at
       ? `${ordinal(me.position)} place`
       : `${me.progress}/${state.question_count}`;
-    renderRaceTracks(state.players, 'ssRaceFinalTrack', state.question_count);
+    renderRaceTracks(state.players, 'ssRaceFinalTrack', state.question_count, { finalView: true });
 
     const table = document.getElementById('ssRaceResultsTable');
     table.innerHTML = `<table class="ss-table ss-race-results-table">
@@ -1359,6 +1465,7 @@
     raceSession.state = null;
     raceSession.answerBusy = false;
     raceSession.lastProgress = null;
+    raceSession.lastTrackProgress = null;
     raceSession.countdownRefreshTriggered = false;
     document.getElementById('ssRaceAnswerInput').value = '';
   }

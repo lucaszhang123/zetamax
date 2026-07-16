@@ -12,20 +12,22 @@
 </head>
 <body class="{% block body_class %}{% endblock %}">
   <nav class="ss-nav">
-    <a class="ss-nav-brand" href="{{ url_for('index') if session.get('user_id') else url_for('login') }}">
-      <span class="ss-brand-mark" aria-hidden="true">z</span>
-      <span>zetamax</span>
-    </a>
-    {% if session.get('user_id') %}
-      <div class="ss-nav-right">
-        <span class="ss-nav-user">{{ session.get('username') }}</span>
-        <a class="ss-nav-link" href="{{ url_for('logout') }}">Log out</a>
-      </div>
-    {% else %}
-      <div class="ss-nav-right ss-auth-nav-right">
-        <span class="ss-nav-user">Fast math. Faster thinking.</span>
-      </div>
-    {% endif %}
+    <div class="ss-nav-inner">
+      <a class="ss-nav-brand" href="{{ url_for('index') if session.get('user_id') else url_for('login') }}">
+        <span class="ss-brand-mark" aria-hidden="true"><span>Z</span></span>
+        <span class="ss-brand-copy"><strong>zetamax</strong><small>speed math arena</small></span>
+      </a>
+      {% if session.get('user_id') %}
+        <div class="ss-nav-right">
+          <span class="ss-nav-user"><span class="ss-user-dot" aria-hidden="true"></span>{{ session.get('username') }}</span>
+          <a class="ss-nav-link" href="{{ url_for('logout') }}">Log out <span aria-hidden="true">↗</span></a>
+        </div>
+      {% else %}
+        <div class="ss-nav-right ss-auth-nav-right">
+          <span class="ss-nav-user"><span class="ss-user-dot" aria-hidden="true"></span>Fast math. Faster thinking.</span>
+        </div>
+      {% endif %}
+    </div>
   </nav>
 
   {% with messages = get_flashed_messages() %}
