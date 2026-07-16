@@ -537,7 +537,28 @@ def make_race_code(db):
     raise RuntimeError("Could not create a unique race code")
 
 
+def cleanup_orphaned_waiting_rooms(db):
+    """Delete waiting rooms whose host is no longer listed as a racer.
+
+    A valid waiting lobby must always contain its host. This also repairs any
+    stale rooms created by older buggy deployments.
+    """
+    db.execute(
+        """
+        DELETE FROM race_rooms
+        WHERE status = 'waiting'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM race_players host_player
+              WHERE host_player.room_id = race_rooms.id
+                AND host_player.user_id = race_rooms.host_user_id
+          )
+        """
+    )
+
+
 def race_room_for_user(db, code, user_id):
+    cleanup_orphaned_waiting_rooms(db)
     return db.execute(
         """
         SELECT rr.*
@@ -742,10 +763,51 @@ def sign_in_user(user):
     session.clear()
     session["user_id"] = user["id"]
     session["username"] = user["username"]
+    # Bind the cookie to this exact database account, not only its integer ID.
+    # On an ephemeral deployment SQLite can be recreated and reuse old IDs;
+    # created_at prevents an old cookie from silently becoming another user.
+    session["user_created_at"] = user["created_at"]
     # New login = new browser-session identity. Tabs loaded under an older
     # account will keep their old token and race requests from those tabs will
     # be rejected instead of silently controlling the newly signed-in player.
     session["page_session_token"] = secrets.token_urlsafe(32)
+
+
+def session_identity_is_current():
+    """Verify that the signed cookie still refers to the same database row.
+
+    Render's free filesystem is ephemeral. If app.db is recreated, SQLite can
+    reuse user IDs while the browser still holds an older, validly signed
+    session cookie. Without this check, the header can say one username while
+    API requests act as whichever new account received the reused numeric ID.
+    """
+    user_id = session.get("user_id")
+    if user_id is None:
+        return False
+
+    expected_username = session.get("username")
+    expected_created_at = session.get("user_created_at")
+    if not expected_username or not expected_created_at:
+        return False
+
+    user = get_db().execute(
+        "SELECT id, username, created_at FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if user is None:
+        return False
+
+    return (
+        str(user["username"]) == str(expected_username)
+        and str(user["created_at"]) == str(expected_created_at)
+    )
+
+
+@app.before_request
+def invalidate_stale_login_cookie():
+    """Clear old cookies before any route can use a recycled SQLite user ID."""
+    if "user_id" in session and not session_identity_is_current():
+        session.clear()
 
 
 def race_page_session_required(view):
@@ -1154,6 +1216,8 @@ def api_join_race():
         return jsonify({"error": "Enter a valid 6-character race code."}), 400
 
     db = get_db()
+    cleanup_orphaned_waiting_rooms(db)
+    db.commit()
     room = db.execute("SELECT * FROM race_rooms WHERE code = ?", (code,)).fetchone()
     if room is None:
         return jsonify({"error": "Race not found. Check the code and try again."}), 404
