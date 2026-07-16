@@ -13,7 +13,7 @@ from sklearn.tree import DecisionTreeRegressor
 
 from flask import (
     Flask, request, session, redirect, url_for,
-    render_template, jsonify, g, flash
+    render_template, jsonify, g, flash, make_response
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -722,10 +722,66 @@ def safe_next_url(value):
     return value
 
 
+PAGE_SESSION_COOKIE = "zetamax_page_session"
+PAGE_SESSION_HEADER = "X-Zetamax-Page-Session"
+
+
+def ensure_page_session_token():
+    """Return a per-login token used to bind an already-open browser tab to
+    the account that originally loaded it. Browser tabs share authentication
+    cookies, so signing into another account in a second tab otherwise changes
+    the identity of every open tab in that browser profile."""
+    token = session.get("page_session_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["page_session_token"] = token
+    return token
+
+
 def sign_in_user(user):
     session.clear()
     session["user_id"] = user["id"]
     session["username"] = user["username"]
+    # New login = new browser-session identity. Tabs loaded under an older
+    # account will keep their old token and race requests from those tabs will
+    # be rejected instead of silently controlling the newly signed-in player.
+    session["page_session_token"] = secrets.token_urlsafe(32)
+
+
+def race_page_session_required(view):
+    """Protect race endpoints from cross-tab account switching.
+
+    Flask's login cookie is shared by all tabs in one browser profile. If a
+    tester signs in as another user in a second tab, an old race tab would
+    otherwise begin acting as the new account. The page sends the token that
+    existed when it loaded; it must still match the current login session.
+    """
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({
+                "error": "Your login session ended. Reload this page and sign in again.",
+                "code": "auth_required",
+            }), 401
+
+        expected = session.get("page_session_token")
+        provided = request.headers.get(PAGE_SESSION_HEADER, "")
+        if (
+            not expected
+            or not provided
+            or not secrets.compare_digest(str(expected), str(provided))
+        ):
+            return jsonify({
+                "error": (
+                    "This tab was opened under a different account. Racing is "
+                    "locked in this tab so it cannot control another player's car. "
+                    "Reload the page, or use an incognito window / separate browser "
+                    "profile to test two accounts at once."
+                ),
+                "code": "account_changed",
+            }), 409
+        return view(*args, **kwargs)
+    return wrapped
 
 
 def normalize_email(value):
@@ -924,7 +980,9 @@ def google_callback():
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("login"))
+    response = make_response(redirect(url_for("login")))
+    response.delete_cookie(PAGE_SESSION_COOKIE, path="/")
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -933,7 +991,22 @@ def logout():
 @app.route("/")
 @login_required
 def index():
-    return render_template("app.html", username=session["username"])
+    token = ensure_page_session_token()
+    response = make_response(
+        render_template("app.html", username=session["username"])
+    )
+    # JavaScript reads this once when the page loads and sends it with race API
+    # requests. It is intentionally not HttpOnly because it is a tab-binding
+    # marker, not the authentication credential itself.
+    response.set_cookie(
+        PAGE_SESSION_COOKIE,
+        token,
+        secure=bool(app.config.get("SESSION_COOKIE_SECURE")),
+        httponly=False,
+        samesite="Lax",
+        path="/",
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -1017,7 +1090,7 @@ def api_delete_run(run_id):
 # Multiplayer race API
 # ---------------------------------------------------------------------------
 @app.route("/api/races", methods=["POST"])
-@login_required
+@race_page_session_required
 def api_create_race():
     data = request.get_json(force=True) or {}
     ops = clean_race_ops(data.get("ops"))
@@ -1073,7 +1146,7 @@ def api_create_race():
 
 
 @app.route("/api/races/join", methods=["POST"])
-@login_required
+@race_page_session_required
 def api_join_race():
     data = request.get_json(force=True) or {}
     code = str(data.get("code", "")).strip().upper()
@@ -1114,7 +1187,7 @@ def api_join_race():
 
 
 @app.route("/api/races/<code>", methods=["GET"])
-@login_required
+@race_page_session_required
 def api_get_race(code):
     db = get_db()
     code = code.strip().upper()
@@ -1131,7 +1204,7 @@ def api_get_race(code):
 
 
 @app.route("/api/races/<code>/start", methods=["POST"])
-@login_required
+@race_page_session_required
 def api_start_race(code):
     db = get_db()
     code = code.strip().upper()
@@ -1162,7 +1235,7 @@ def api_start_race(code):
 
 
 @app.route("/api/races/<code>/answer", methods=["POST"])
-@login_required
+@race_page_session_required
 def api_answer_race(code):
     data = request.get_json(force=True) or {}
     try:
@@ -1252,7 +1325,7 @@ def api_answer_race(code):
 
 
 @app.route("/api/races/<code>/leave", methods=["POST"])
-@login_required
+@race_page_session_required
 def api_leave_race(code):
     db = get_db()
     code = code.strip().upper()
@@ -1274,7 +1347,7 @@ def api_leave_race(code):
 
 
 @app.route("/api/race_career", methods=["GET"])
-@login_required
+@race_page_session_required
 def api_race_career():
     """Aggregate completed race performance for the signed-in user.
 

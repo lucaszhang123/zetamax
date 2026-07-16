@@ -1004,15 +1004,98 @@
     transitionId: 0,
   };
 
+  function readCookie(name) {
+    const prefix = `${encodeURIComponent(name)}=`;
+    const item = document.cookie
+      .split(';')
+      .map(part => part.trim())
+      .find(part => part.startsWith(prefix));
+    return item ? decodeURIComponent(item.slice(prefix.length)) : '';
+  }
+
+  // This value is captured once when this page loads. Signing into another
+  // account in a different tab changes the shared login cookie, but it does
+  // not change this old tab's captured marker. The server can therefore stop
+  // the old tab before it starts controlling the newly signed-in account.
+  const RACE_PAGE_SESSION_TOKEN = readCookie('zetamax_page_session');
+  let raceAccountLockShown = false;
+
+  function lockRaceForAccountChange(message) {
+    if (raceAccountLockShown) return;
+    raceAccountLockShown = true;
+    raceSession.answerBusy = true;
+    stopRacePolling();
+
+    const input = document.getElementById('ssRaceAnswerInput');
+    if (input) input.disabled = true;
+
+    const overlay = document.createElement('div');
+    overlay.setAttribute('role', 'alertdialog');
+    overlay.setAttribute('aria-modal', 'true');
+    Object.assign(overlay.style, {
+      position: 'fixed', inset: '0', zIndex: '99999',
+      display: 'grid', placeItems: 'center', padding: '24px',
+      background: 'rgba(4, 8, 15, .82)', backdropFilter: 'blur(8px)',
+    });
+
+    const card = document.createElement('div');
+    Object.assign(card.style, {
+      width: 'min(560px, 100%)', padding: '28px', borderRadius: '18px',
+      border: '1px solid rgba(85, 183, 201, .38)',
+      background: '#121a27', color: '#ece8de',
+      boxShadow: '0 24px 80px rgba(0,0,0,.55)',
+      fontFamily: 'Inter, sans-serif',
+    });
+
+    const title = document.createElement('h2');
+    title.textContent = 'Account changed in another tab';
+    Object.assign(title.style, { margin: '0 0 10px', fontSize: '22px' });
+
+    const body = document.createElement('p');
+    body.textContent = message || 'This race tab has been locked to prevent it from controlling another player.';
+    Object.assign(body.style, {
+      margin: '0 0 18px', color: '#a8b2c3', lineHeight: '1.55', fontSize: '14px',
+    });
+
+    const note = document.createElement('p');
+    note.textContent = 'To test two accounts at once, use an incognito window, another browser, or a separate browser profile.';
+    Object.assign(note.style, {
+      margin: '0 0 22px', color: '#55b7c9', lineHeight: '1.5', fontSize: '13px',
+    });
+
+    const reload = document.createElement('button');
+    reload.type = 'button';
+    reload.textContent = 'Reload as the current account';
+    Object.assign(reload.style, {
+      border: '0', borderRadius: '10px', padding: '12px 18px',
+      background: '#e8a33d', color: '#161006', fontWeight: '700', cursor: 'pointer',
+    });
+    reload.addEventListener('click', () => window.location.reload());
+
+    card.append(title, body, note, reload);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+  }
+
   async function raceApi(url, options = {}) {
-    const response = await fetch(url, options);
+    const headers = new Headers(options.headers || {});
+    if (RACE_PAGE_SESSION_TOKEN) {
+      headers.set('X-Zetamax-Page-Session', RACE_PAGE_SESSION_TOKEN);
+    }
+
+    const response = await fetch(url, { ...options, headers });
     const text = await response.text();
     let data = {};
     if (text) {
       try { data = JSON.parse(text); } catch (_) { data = {}; }
     }
     if (!response.ok) {
-      throw new Error(data.error || `Race request failed (${response.status})`);
+      const error = new Error(data.error || `Race request failed (${response.status})`);
+      error.code = data.code || '';
+      if (error.code === 'account_changed' || error.code === 'auth_required') {
+        lockRaceForAccountChange(error.message);
+      }
+      throw error;
     }
     return data;
   }
