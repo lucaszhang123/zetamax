@@ -29,22 +29,42 @@ except ImportError:
     pass
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "app.db")
+
+# Locally this uses the project folder.
+# On Render, DATA_DIR will point to the persistent disk.
+DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DB_PATH = os.path.join(DATA_DIR, "app.db")
 
 app = Flask(__name__)
+
+# Persist the secret key across restarts
+SECRET_KEY_ENV = os.environ.get("SECRET_KEY", "").strip()
+
+if SECRET_KEY_ENV:
+    app.secret_key = SECRET_KEY_ENV
+else:
+    SECRET_FILE = os.path.join(BASE_DIR, ".secret_key")
+
+    if os.path.exists(SECRET_FILE):
+        with open(SECRET_FILE, "r") as f:
+            app.secret_key = f.read().strip()
+    else:
+        key = secrets.token_hex(32)
+        with open(SECRET_FILE, "w") as f:
+            f.write(key)
+        app.secret_key = key
+
+
+# Session cookie configuration
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get(
+        "SESSION_COOKIE_SECURE", "0"
+    ) == "1",
 )
-# Persist the secret key across restarts so sessions don't get invalidated
-SECRET_FILE = os.path.join(BASE_DIR, ".secret_key")
-if os.path.exists(SECRET_FILE):
-    app.secret_key = open(SECRET_FILE, "r").read().strip()
-else:
-    key = secrets.token_hex(32)
-    with open(SECRET_FILE, "w") as f:
-        f.write(key)
-    app.secret_key = key
 
 
 # ---------------------------------------------------------------------------
