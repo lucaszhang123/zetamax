@@ -999,6 +999,9 @@
     lastProgress: null,
     lastTrackProgress: null,
     countdownRefreshTriggered: false,
+    // Incremented whenever the user switches rooms. Poll responses from an
+    // older room are ignored so they cannot pull the UI back into stale state.
+    transitionId: 0,
   };
 
   async function raceApi(url, options = {}) {
@@ -1459,6 +1462,8 @@
   }
 
   function resetRaceSession() {
+    // Invalidate any fetch that was started for the previous room.
+    raceSession.transitionId += 1;
     stopRacePolling();
     localStorage.removeItem(RACE_STORAGE_KEY);
     raceSession.code = null;
@@ -1468,6 +1473,26 @@
     raceSession.lastTrackProgress = null;
     raceSession.countdownRefreshTriggered = false;
     document.getElementById('ssRaceAnswerInput').value = '';
+  }
+
+  function beginRaceSwitch() {
+    const snapshot = {
+      code: raceSession.code,
+      state: raceSession.state,
+      transitionId: raceSession.transitionId + 1,
+    };
+    raceSession.transitionId = snapshot.transitionId;
+    stopRacePolling();
+    return snapshot;
+  }
+
+  function restoreRaceAfterFailedSwitch(snapshot) {
+    if (!snapshot || snapshot.transitionId !== raceSession.transitionId) return;
+    if (!snapshot.code || !snapshot.state) return;
+    raceSession.code = snapshot.code;
+    raceSession.state = snapshot.state;
+    localStorage.setItem(RACE_STORAGE_KEY, snapshot.code);
+    ensureRacePolling();
   }
 
   function activateRaceState(state) {
@@ -1497,13 +1522,27 @@
 
   async function refreshRaceState() {
     if (!raceSession.code || raceSession.pollBusy) return;
+    const requestedCode = raceSession.code;
+    const requestedTransitionId = raceSession.transitionId;
     raceSession.pollBusy = true;
     try {
-      const state = await apiGetRace(raceSession.code);
+      const state = await apiGetRace(requestedCode);
+
+      // A create/join/leave may have happened while this request was in
+      // flight. Never let an old response replace the newly selected room.
+      if (
+        requestedTransitionId !== raceSession.transitionId
+        || requestedCode !== raceSession.code
+      ) return;
+
       activateRaceState(state);
     } catch (error) {
       console.error('race polling failed', error);
-      if (/not found/i.test(error.message)) {
+      if (
+        requestedTransitionId === raceSession.transitionId
+        && requestedCode === raceSession.code
+        && /not found/i.test(error.message)
+      ) {
         resetRaceSession();
         showScreen('race');
         setRaceMessage('ssRaceSetupMessage', error.message, true);
@@ -1562,11 +1601,23 @@
     const button = document.getElementById('ssCreateRace');
     button.disabled = true;
     setRaceMessage('ssRaceSetupMessage', 'Creating a shared question set…');
+    const switchSnapshot = beginRaceSwitch();
     try {
       const state = await apiCreateRace(ops, getRanges(), questionCount);
+      if (switchSnapshot.transitionId !== raceSession.transitionId) return;
+
+      const previousCode = switchSnapshot.code;
       setRaceMessage('ssRaceSetupMessage', '');
       activateRaceState(state);
+
+      // Cleanly leave an older room after the new room is confirmed.
+      if (previousCode && previousCode !== state.code) {
+        apiLeaveRace(previousCode).catch(error => {
+          console.warn('could not leave previous race cleanly', error);
+        });
+      }
     } catch (error) {
+      restoreRaceAfterFailedSwitch(switchSnapshot);
       setRaceMessage('ssRaceSetupMessage', error.message, true);
     } finally {
       button.disabled = false;
@@ -1583,11 +1634,22 @@
     const button = document.getElementById('ssJoinRace');
     button.disabled = true;
     setRaceMessage('ssRaceSetupMessage', 'Joining race…');
+    const switchSnapshot = beginRaceSwitch();
     try {
       const state = await apiJoinRace(code);
+      if (switchSnapshot.transitionId !== raceSession.transitionId) return;
+
+      const previousCode = switchSnapshot.code;
       setRaceMessage('ssRaceSetupMessage', '');
       activateRaceState(state);
+
+      if (previousCode && previousCode !== state.code) {
+        apiLeaveRace(previousCode).catch(error => {
+          console.warn('could not leave previous race cleanly', error);
+        });
+      }
     } catch (error) {
+      restoreRaceAfterFailedSwitch(switchSnapshot);
       setRaceMessage('ssRaceSetupMessage', error.message, true);
     } finally {
       button.disabled = false;

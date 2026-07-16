@@ -175,6 +175,16 @@ def init_db():
             FOREIGN KEY (host_user_id) REFERENCES users (id)
         )
     """)
+    # Migration for databases created before custom race lengths existed.
+    race_room_cols = {
+        row[1] for row in db.execute("PRAGMA table_info(race_rooms)").fetchall()
+    }
+    if "question_count" not in race_room_cols:
+        db.execute(
+            "ALTER TABLE race_rooms "
+            "ADD COLUMN question_count INTEGER NOT NULL DEFAULT 50"
+        )
+
     db.execute("""
         CREATE TABLE IF NOT EXISTS race_players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -537,6 +547,41 @@ def race_room_for_user(db, code, user_id):
         """,
         (code, user_id),
     ).fetchone()
+
+
+def leave_other_waiting_races(db, user_id, keep_room_id=None):
+    """Keep one waiting-room membership per user.
+
+    Starting or joining a new waiting room abandons any older waiting room.
+    If the user hosted the old room, delete the room; otherwise remove only
+    that user's player row. Active races are intentionally left alone.
+    """
+    params = [user_id]
+    keep_sql = ""
+    if keep_room_id is not None:
+        keep_sql = " AND rr.id != ?"
+        params.append(keep_room_id)
+
+    rows = db.execute(
+        f"""
+        SELECT rr.id, rr.host_user_id
+        FROM race_rooms rr
+        JOIN race_players rp ON rp.room_id = rr.id
+        WHERE rp.user_id = ?
+          AND rr.status = 'waiting'
+          {keep_sql}
+        """,
+        tuple(params),
+    ).fetchall()
+
+    for row in rows:
+        if int(row["host_user_id"]) == int(user_id):
+            db.execute("DELETE FROM race_rooms WHERE id = ?", (row["id"],))
+        else:
+            db.execute(
+                "DELETE FROM race_players WHERE room_id = ? AND user_id = ?",
+                (row["id"], user_id),
+            )
 
 
 def maybe_finish_race(db, room_id):
@@ -980,6 +1025,10 @@ def api_create_race():
     question_count = clean_race_question_count(data.get("question_count"))
     db = get_db()
 
+    # Creating a room means this user is abandoning any older waiting room.
+    # This guarantees a newly created lobby begins with the creator only.
+    leave_other_waiting_races(db, session["user_id"])
+
     # Remove abandoned waiting rooms created by this user more than a day ago.
     cutoff = iso_utc(utc_now() - timedelta(days=1))
     old_rooms = db.execute(
@@ -1050,6 +1099,10 @@ def api_join_race():
     ).fetchone()["n"]
     if int(count) >= RACE_MAX_PLAYERS:
         return jsonify({"error": f"That race is full ({RACE_MAX_PLAYERS} players)."}), 409
+
+    # A user can wait in only one lobby at a time. Remove stale membership in
+    # any other waiting room before joining this one.
+    leave_other_waiting_races(db, session["user_id"], keep_room_id=room["id"])
 
     now = iso_utc()
     db.execute(
