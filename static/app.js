@@ -1791,13 +1791,44 @@
     raceSession.answerBusy = true;
     input.disabled = true;
     try {
-      const nextState = await apiSubmitRaceAnswer(state.code, answer);
-      raceSession.state = nextState;
-      updateRaceServerClock(nextState);
-      if (!nextState.answer_correct) {
-        // This should only happen if the question changed between the input
-        // event and the request. Keep the typed value and refresh state.
-        activateRaceState(nextState);
+      const result = await apiSubmitRaceAnswer(state.code, answer);
+      updateRaceServerClock(result);
+
+      if (result.light) {
+        // Fast path: the server only sent back this player's own next
+        // question, not a full room rebuild. Patch just this player's
+        // entry in the existing local state instead of waiting on/asking
+        // for a full race_state() — this is what removes the extra
+        // round-trip that was making the input feel laggy.
+        const me = currentRacePlayer(state);
+        if (me) {
+          me.progress = result.progress;
+          if (!result.answer_correct) me.wrong_attempts = (me.wrong_attempts || 0) + 1;
+        }
+        state.current_question = result.current_question;
+        state.current_answer = result.current_answer;
+        raceSession.state = state;
+
+        if (!result.answer_correct) {
+          // Wrong-answer edge case (question changed underneath the
+          // client): keep it lightweight too, just refresh this player's
+          // row and let the next poll tick reconcile everyone else.
+          input.disabled = false;
+          return;
+        }
+
+        input.value = '';
+        const card = document.getElementById('ssRaceProblemCard');
+        card.classList.remove('ss-flash-wrong');
+        card.classList.add('ss-flash-correct');
+        setTimeout(() => card.classList.remove('ss-flash-correct'), 180);
+        renderRaceGame(state);
+        return;
+      }
+
+      raceSession.state = result;
+      if (!result.answer_correct) {
+        activateRaceState(result);
         return;
       }
 
@@ -1806,7 +1837,7 @@
       card.classList.remove('ss-flash-wrong');
       card.classList.add('ss-flash-correct');
       setTimeout(() => card.classList.remove('ss-flash-correct'), 180);
-      activateRaceState(nextState);
+      activateRaceState(result);
     } catch (error) {
       setRaceMessage('ssRaceLobbyMessage', error.message, true);
     } finally {

@@ -1331,14 +1331,21 @@ def api_answer_race(code):
         ).fetchone()
         progress = int(player["progress"])
         question_count = int(room["question_count"])
+
         if progress >= question_count or player["finished_at"]:
             db.commit()
-            state = race_state(db, room, session["user_id"])
-            state["answer_correct"] = True
-            return jsonify(state)
+            return jsonify({
+                "answer_correct": True,
+                "light": True,
+                "progress": progress,
+                "question_count": question_count,
+                "current_question": None,
+                "current_answer": None,
+            })
 
         questions = json.loads(room["questions"])
         correct = submitted == int(questions[progress]["answer"])
+
         if not correct:
             db.execute(
                 """
@@ -1349,15 +1356,20 @@ def api_answer_race(code):
                 (iso_utc(now), room["id"], session["user_id"]),
             )
             db.commit()
-            room = db.execute("SELECT * FROM race_rooms WHERE id = ?", (room["id"],)).fetchone()
-            state = race_state(db, room, session["user_id"])
-            state["answer_correct"] = False
-            return jsonify(state)
+            return jsonify({
+                "answer_correct": False,
+                "light": True,
+                "progress": progress,
+                "question_count": question_count,
+                "current_question": questions[progress]["question"],
+                "current_answer": int(questions[progress]["answer"]),
+            })
 
         new_progress = progress + 1
         finished_at = None
         elapsed_ms = None
-        if new_progress >= question_count:
+        just_finished = new_progress >= question_count
+        if just_finished:
             finished_at = iso_utc(now)
             elapsed_ms = max(1, int((now - started).total_seconds() * 1000))
 
@@ -1376,8 +1388,23 @@ def api_answer_race(code):
                 session["user_id"],
             ),
         )
-        maybe_finish_race(db, room["id"])
+
+        if just_finished:
+            maybe_finish_race(db, room["id"])
+
         db.commit()
+
+        if not just_finished:
+            next_q = questions[new_progress]
+            return jsonify({
+                "answer_correct": True,
+                "light": True,
+                "progress": new_progress,
+                "question_count": question_count,
+                "current_question": next_q["question"],
+                "current_answer": int(next_q["answer"]),
+            })
+
     except Exception:
         db.rollback()
         raise
