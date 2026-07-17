@@ -1,4 +1,6 @@
 # Zetamax
+Deployed at https://zetamax.onrender.com/. Currently on free plan of onrender so 
+accounts disappear after inactivity due to db resets
 
 A Zetamac-style mental math trainer with accounts. Python (Flask) backend,
 plain HTML/CSS/JS frontend. Improvement mode is driven by a decision tree
